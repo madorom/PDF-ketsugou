@@ -84,7 +84,7 @@ with st.sidebar:
         st.rerun()
 
 # --- 4. ファイルの読み込み ---
-uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("ファイルを選択", type=["pdf", "docx", "xlsx", "pptx"], accept_multiple_files=True)
 
 if uploaded_files:
     current_files = [p["filename"] for p in st.session_state.all_pages_data]
