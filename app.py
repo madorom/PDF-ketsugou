@@ -6,10 +6,10 @@ from pypdf import PdfWriter, PdfReader
 from pathlib import Path
 from pdf2image import convert_from_path
 
-st.set_page_config(page_title="PDF編集スタジオ", layout="wide")
+st.set_page_config(page_title="PDF超編集スタジオ", layout="wide")
 
-st.title("🎨 PDF編集・合体スタジオ")
-st.write("ファイルごとに中身を確認して、向きを変えられるよ！")
+st.title("✂️ PDF切り貼り・合体スタジオ")
+st.write("いらないページを捨てたり、向きを変えたり、自由自在に編集しよう！")
 
 # 1. ファイルをアップロード
 uploaded_files = st.file_uploader(
@@ -18,21 +18,19 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# 状態を保存するための変数（セッションステート）
-if "rotations" not in st.session_state:
-    st.session_state.rotations = {}
+# 状態を保存するための変数
+if "page_settings" not in st.session_state:
+    st.session_state.page_settings = {}
 
 if uploaded_files:
-    # 準備ができたPDFたちを保存する場所
     ready_pdfs = []
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
 
-        # 各ファイルの処理
         for uploaded_file in uploaded_files:
-            file_key = uploaded_file.name
-            st.subheader(f"📂 ファイル: {file_key}")
+            f_key = uploaded_file.name
+            st.subheader(f"📂 ファイル: {f_key}")
             
             # --- ステップA: PDFに変換する ---
             input_path = temp_dir_path / uploaded_file.name
@@ -41,77 +39,94 @@ if uploaded_files:
             
             current_pdf = input_path
             if input_path.suffix.lower() != ".pdf":
-                with st.spinner(f"{file_key} をPDFに変換中..."):
+                with st.spinner("PDFに変換中..."):
                     subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
                     current_pdf = temp_dir_path / (input_path.stem + ".pdf")
 
-            # --- ステップB: プレビューと回転設定 ---
+            # PDFの情報を読み取る
+            reader = PdfReader(current_pdf)
+            num_pages = len(reader.pages)
+
+            # --- ステップB: ページの選択と回転 ---
             col1, col2 = st.columns([1, 2])
             
             with col1:
-                # 何度回すか選ぶボタン
-                rotate_val = st.radio(
-                    f"向きをかえる ({file_key})",
-                    [0, 90, 180, 270],
-                    index=0,
-                    key=f"rot_{file_key}",
-                    horizontal=True
+                st.write(f"このファイルは全部で **{num_pages}ページ** あります。")
+                
+                # 使うページをえらぶ
+                selected_pages = st.multiselect(
+                    "使うページをえらんでね（空っぽにすると全部使います）",
+                    range(1, num_pages + 1),
+                    default=range(1, num_pages + 1),
+                    key=f"pages_{f_key}"
                 )
-                st.session_state.rotations[file_key] = rotate_val
+                
+                # 向きをかえる
+                rotate_val = st.radio(
+                    "向きをかえる", [0, 90, 180, 270], index=0, 
+                    key=f"rot_{f_key}", horizontal=True
+                )
             
             with col2:
-                # PDFの1ページ目を画像にして見せる
+                # 代表して1ページ目だけプレビュー
                 try:
-                    images = convert_from_path(current_pdf, first_page=1, last_page=1, size=(300, None))
+                    images = convert_from_path(current_pdf, first_page=1, last_page=1, size=(250, None))
                     if images:
-                        img = images[0].rotate(-rotate_val, expand=True) # プレビューも回す
+                        img = images[0].rotate(-rotate_val, expand=True)
                         st.image(img, caption="1ページ目のプレビュー")
                 except:
-                    st.warning("プレビューが表示できませんでした")
+                    st.write("（プレビューは出せませんでした）")
 
-            ready_pdfs.append((current_pdf, file_key))
+            ready_pdfs.append({
+                "path": current_pdf,
+                "name": f_key,
+                "keep_pages": selected_pages,
+                "rotation": rotate_val
+            })
 
         st.divider()
         
-        # --- ステップC: OCR設定と最終合体 ---
-        use_ocr = st.checkbox("OCR（文字をよみとる）を全ページにかける")
+        # --- ステップC: 最終合体 ---
+        use_ocr = st.checkbox("OCR（文字をよみとる）をかける")
         
-        if st.button("✨ ぜんぶ合体して保存する", type="primary"):
+        if st.button("🚀 編集をすべて反映して合体！", type="primary"):
             merger = PdfWriter()
-            progress_bar = st.progress(0)
-
-            for i, (pdf_path, f_key) in enumerate(ready_pdfs):
-                # 回転を適用
-                reader = PdfReader(pdf_path)
+            
+            for item in ready_pdfs:
+                reader = PdfReader(item["path"])
                 writer = PdfWriter()
-                rot = st.session_state.rotations.get(f_key, 0)
-
-                for page in reader.pages:
-                    page.rotate(rot)
+                
+                # 選んだページだけを抜き出す
+                # プログラミングは0から数えるので -1 します
+                pages_to_add = [p - 1 for p in item["keep_pages"]]
+                
+                for idx in pages_to_add:
+                    page = reader.pages[idx]
+                    page.rotate(item["rotation"]) # 回転させる
                     writer.add_page(page)
                 
-                rotated_pdf = temp_dir_path / f"final_{f_key}.pdf"
-                with open(rotated_pdf, "wb") as f:
+                # 一時保存
+                temp_output = temp_dir_path / f"mod_{item['name']}.pdf"
+                with open(temp_output, "wb") as f:
                     writer.write(f)
                 
-                final_path = rotated_pdf
+                final_path = temp_output
 
                 # OCRが必要な場合
                 if use_ocr:
-                    st.write(f"👁️ {f_key} を読み取り中...")
-                    ocr_pdf = temp_dir_path / f"ocr_{f_key}.pdf"
+                    st.write(f"👁️ {item['name']} を読み取り中...")
+                    ocr_pdf = temp_dir_path / f"ocr_{item['name']}.pdf"
                     subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_pdf)])
                     if ocr_pdf.exists():
                         final_path = ocr_pdf
                 
                 merger.append(str(final_path))
-                progress_bar.progress((i + 1) / len(ready_pdfs))
 
-            # 合体完了
-            output_pdf_path = temp_dir_path / "studio_result.pdf"
-            with open(output_pdf_path, "wb") as f:
+            # 最後の保存
+            result_path = temp_dir_path / "final.pdf"
+            with open(result_path, "wb") as f:
                 merger.write(f)
             
-            st.success("🎉 すべての作業が完了しました！")
-            with open(output_pdf_path, "rb") as f:
-                st.download_button("完成したPDFをダウンロード", f.read(), "final_document.pdf")
+            st.success("🎉 完ぺきです！いらないページを捨てて合体しました！")
+            with open(result_path, "rb") as f:
+                st.download_button("完成したPDFをもらう", f.read(), "edited_document.pdf")
