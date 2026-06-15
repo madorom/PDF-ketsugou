@@ -3,3 +3,4 @@ pypdf
 ocrmypdf
 pdf2image
 Pillow
+streamlit-sortables
