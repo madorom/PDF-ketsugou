@@ -6,19 +6,16 @@ from pypdf import PdfWriter, PdfReader
 from pathlib import Path
 from pdf2image import convert_from_path
 
-st.set_page_config(page_title="PDF超編集スタジオ", layout="wide")
+st.set_page_config(page_title="PDFページ編集プロ", layout="wide")
 
-st.title("🔍 PDF拡大・ページめくりスタジオ（倍率キープ版）")
-st.write("ページをめくっても、拡大した大きさがそのまま維持されるよ！")
+st.title("✂️ PDFページ別・編集スタジオ")
+st.write("ページごとに「削除」や「回転」がポチポチできるよ！")
 
-# --- 魔法のメモ帳（セッションステート）の準備 ---
-# 1. ページ番号を覚えておくメモ
-if "page_numbers" not in st.session_state:
-    st.session_state.page_numbers = {}
-
-# 2. 🌟【新機能】拡大率をアプリ全体で覚えておくメモ（最初は500サイズ）
+# --- 魔法の「ページ管理帳」を準備する ---
+if "pdf_data" not in st.session_state:
+    st.session_state.pdf_data = {} # ファイルごとの情報を入れる
 if "global_zoom" not in st.session_state:
-    st.session_state.global_zoom = 500
+    st.session_state.global_zoom = 600
 
 uploaded_files = st.file_uploader(
     "ファイルをえらんでね", 
@@ -27,8 +24,6 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    ready_pdfs = []
-
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
 
@@ -37,118 +32,129 @@ if uploaded_files:
             st.divider()
             st.subheader(f"📂 ファイル: {f_key}")
             
-            # PDFに変換する処理
-            input_path = temp_dir_path / uploaded_file.name
+            # --- 1. PDFに変換する（初回だけ） ---
+            input_path = temp_dir_path / f_key
             with open(input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
-            current_pdf = input_path
+            pdf_path = input_path
             if input_path.suffix.lower() != ".pdf":
-                with st.spinner("PDFに変換中..."):
-                    subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
-                    current_pdf = temp_dir_path / (input_path.stem + ".pdf")
+                pdf_path = temp_dir_path / (input_path.stem + ".pdf")
+                if not pdf_path.exists():
+                    with st.spinner("PDFに変換中..."):
+                        subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
 
-            reader = PdfReader(current_pdf)
+            # --- 2. ページ情報を管理帳に登録する（初回だけ） ---
+            reader = PdfReader(pdf_path)
             num_pages = len(reader.pages)
-
-            if f_key not in st.session_state.page_numbers:
-                st.session_state.page_numbers[f_key] = 1
             
-            current_p = st.session_state.page_numbers[f_key]
+            if f_key not in st.session_state.pdf_data:
+                # ページごとの設定（回転0度、削除なし）を初期化
+                st.session_state.pdf_data[f_key] = {
+                    "path": str(pdf_path),
+                    "current_page": 1,
+                    "pages": {p: {"rotate": 0, "active": True} for p in range(1, num_pages + 1)}
+                }
 
-            # --- 画面を左右にわける ---
-            col_settings, col_viewer = st.columns([1, 2])
-            
-            with col_settings:
-                st.write(f"全 **{num_pages}** ページ")
+            file_info = st.session_state.pdf_data[f_key]
+            curr_p = file_info["current_page"]
+            page_settings = file_info["pages"][curr_p]
+
+            # --- 3. 画面のレイアウト ---
+            col_ctrl, col_view = st.columns([1, 2])
+
+            with col_ctrl:
+                st.write(f"ページ: **{curr_p} / {num_pages}**")
                 
                 # ページめくりボタン
-                c1, c2, c3 = st.columns([1, 2, 1])
+                c1, c2 = st.columns(2)
                 with c1:
                     if st.button("⬅️ 前へ", key=f"prev_{f_key}"):
-                        if st.session_state.page_numbers[f_key] > 1:
-                            st.session_state.page_numbers[f_key] -= 1
+                        if curr_p > 1:
+                            file_info["current_page"] -= 1
                             st.rerun()
                 with c2:
-                    st.write(f"**{st.session_state.page_numbers[f_key]} / {num_pages}**")
-                with c3:
                     if st.button("次へ ➡️", key=f"next_{f_key}"):
-                        if st.session_state.page_numbers[f_key] < num_pages:
-                            st.session_state.page_numbers[f_key] += 1
+                        if curr_p < num_pages:
+                            file_info["current_page"] += 1
                             st.rerun()
 
-                # スライダー
-                if num_pages > 1:
-                    st.session_state.page_numbers[f_key] = st.slider(
-                        "スライダーでめくる", 1, num_pages, 
-                        value=st.session_state.page_numbers[f_key],
-                        key=f"slide_{f_key}"
-                    )
+                st.divider()
 
-                # 🌟【新機能】拡大率スライダー（共通のメモを使う）
-                st.session_state.global_zoom = st.slider(
-                    "🔍 大きさをかえる（すべてのページに反映）", 
-                    300, 1500, 
-                    value=st.session_state.global_zoom, # 共通のメモから数字を出す
-                    step=50, 
-                    key=f"zoom_slider_{f_key}" # キーはファイルごとに変えるけど中身は共通
-                )
+                # 🌟 このページ専用の操作ボタン
+                status = "✅ 使う" if page_settings["active"] else "❌ 削除済み"
+                st.write(f"このページの状態: **{status}**")
+                
+                if st.button("🗑️ このページを 削除/復活" , key=f"del_{f_key}"):
+                    page_settings["active"] = not page_settings["active"]
+                    st.rerun()
 
-                selected_pages = st.multiselect(
-                    "合体させるページ", range(1, num_pages + 1),
-                    default=range(1, num_pages + 1), key=f"sel_{f_key}"
-                )
-                rotate_val = st.radio(
-                    "向き", [0, 90, 180, 270], index=0, key=f"rot_{f_key}", horizontal=True
-                )
-            
-            with col_viewer:
+                if st.button("🔄 右に90度まわす", key=f"rot_{f_key}"):
+                    page_settings["rotate"] = (page_settings["rotate"] + 90) % 360
+                    st.rerun()
+
+                st.divider()
+                # 拡大率（全体共通）
+                st.session_state.global_zoom = st.slider("🔍 ズーム", 300, 1500, st.session_state.global_zoom, key=f"zoom_{f_key}")
+
+            with col_view:
+                # プレビュー表示
                 try:
-                    with st.spinner("ページを表示中..."):
-                        p_to_show = st.session_state.page_numbers[f_key]
-                        images = convert_from_path(current_pdf, first_page=p_to_show, last_page=p_to_show)
-                        if images:
-                            img = images[0].rotate(-rotate_val, expand=True)
-                            # 🌟 共通の拡大率で表示！
+                    images = convert_from_path(pdf_path, first_page=curr_p, last_page=curr_p)
+                    if images:
+                        # ページごとの回転を反映して表示
+                        img = images[0].rotate(-page_settings["rotate"], expand=True)
+                        # 削除済みの場合は白黒っぽくする（薄くする）
+                        if not page_settings["active"]:
+                            img = img.convert("L").convert("RGB") 
+                            st.image(img, width=st.session_state.global_zoom, caption="⚠️ このページは削除されます")
+                        else:
                             st.image(img, width=st.session_state.global_zoom)
                 except:
-                    st.error("プレビューが見られませんでした。")
+                    st.error("プレビューエラー")
 
-            ready_pdfs.append({
-                "path": current_pdf, "name": f_key,
-                "keep_pages": selected_pages, "rotation": rotate_val
-            })
-
-        # --- 合体ボタン ---
+        # --- 4. 最終的な合体ボタン ---
         st.divider()
+        st.subheader("🏁 仕上げ")
         use_ocr = st.checkbox("OCR（文字を読み取る）をかける")
-        if st.button("🚀 この内容でPDFを合体する", type="primary", use_container_width=True):
-            merger = PdfWriter()
-            for item in ready_pdfs:
-                reader = PdfReader(item["path"])
-                writer = PdfWriter()
-                pages_to_add = [p - 1 for p in item["keep_pages"]]
-                for idx in pages_to_add:
-                    page = reader.pages[idx]
-                    page.rotate(item["rotation"])
-                    writer.add_page(page)
+        
+        if st.button("🚀 編集をすべて反映してPDFを作る", type="primary", use_container_width=True):
+            final_merger = PdfWriter()
+            
+            for f_name, info in st.session_state.pdf_data.items():
+                temp_reader = PdfReader(info["path"])
+                temp_writer = PdfWriter()
                 
-                temp_output = temp_dir_path / f"mod_{item['name']}.pdf"
-                with open(temp_output, "wb") as f:
-                    writer.write(f)
+                added_count = 0
+                for p_num, settings in info["pages"].items():
+                    if settings["active"]:
+                        # 使うページだけを取り出して、そのページの設定で回す
+                        page_obj = temp_reader.pages[p_num - 1]
+                        page_obj.rotate(settings["rotate"])
+                        temp_writer.add_page(page_obj)
+                        added_count += 1
                 
-                final_path = temp_output
-                if use_ocr:
-                    st.write(f"👁️ {item['name']} を読み取り中...")
-                    ocr_pdf = temp_dir_path / f"ocr_{item['name']}.pdf"
-                    subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_pdf)])
-                    if ocr_pdf.exists():
-                        final_path = ocr_pdf
-                merger.append(str(final_path))
-
-            result_path = temp_dir_path / "final.pdf"
-            with open(result_path, "wb") as f:
-                merger.write(f)
-            st.success("🎉 完成しました！")
-            with open(result_path, "rb") as f:
-                st.download_button("完成したPDFをダウンロード", f.read(), "final_result.pdf")
+                if added_count > 0:
+                    # 一時ファイルに保存
+                    p_out = temp_dir_path / f"final_{f_name}.pdf"
+                    with open(p_out, "wb") as f:
+                        temp_writer.write(f)
+                    
+                    final_path = p_out
+                    if use_ocr:
+                        st.write(f"👁️ {f_name} を読み取り中...")
+                        ocr_p = temp_dir_path / f"ocr_{f_name}.pdf"
+                        subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
+                        if ocr_p.exists():
+                            final_path = ocr_p
+                    
+                    final_merger.append(str(final_path))
+            
+            # まとめて保存
+            result_file = temp_dir_path / "studio_final.pdf"
+            with open(result_file, "wb") as f:
+                final_merger.write(f)
+            
+            st.success("🎉 完璧です！あなたの指示通りにPDFを組み立てました！")
+            with open(result_file, "rb") as f:
+                st.download_button("完成したPDFをダウンロード", f.read(), "my_edited_pdf.pdf")
