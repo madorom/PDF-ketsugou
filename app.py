@@ -9,8 +9,8 @@ from streamlit_sortables import sort_items
 
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🔍 PDF超拡大・編集スタジオ")
-st.write("拡大ボタン（🔍）を押すと、画面いっぱいに大きく表示されるよ！")
+st.title("🚀 PDFプロ・編集スタジオ（拡大操作版）")
+st.write("拡大したまま「削除・回転・ページ移動」が全部できるようになったよ！")
 
 # --- 魔法のメモ帳 ---
 if "all_pages_data" not in st.session_state:
@@ -18,14 +18,49 @@ if "all_pages_data" not in st.session_state:
 if "global_zoom" not in st.session_state:
     st.session_state.global_zoom = 250
 
-# --- 🌟【新機能】特大サイズの拡大鏡（width="large" を追加） ---
-@st.dialog("ページを拡大して確認", width="large")
-def zoom_modal(img, rotation):
-    # 回転を反映させる
-    rotated_img = img.rotate(-rotation, expand=True)
-    # 🌟 画面の横幅いっぱいに表示する
-    st.image(rotated_img, use_container_width=True)
-    st.write("※右上の「×」で閉じます")
+# --- 🌟【新機能】操作ができる特大拡大鏡 ---
+@st.dialog("ページを編集・確認", width="large")
+def zoom_edit_modal(index):
+    # いま見ているページの情報を取り出す
+    page_info = st.session_state.all_pages_data[index]
+    
+    # 1. リモコン（ボタン）の配置
+    col_nav1, col_edit, col_nav2 = st.columns([1, 2, 1])
+    
+    with col_nav1:
+        if st.button("⬅️ 前のページ", use_container_width=True):
+            if index > 0:
+                st.session_state.zoom_index = index - 1
+                st.rerun()
+    
+    with col_edit:
+        c1, c2 = st.columns(2)
+        with c1:
+            icon = "🗑️ 削除する" if page_info["active"] else "✅ 復活させる"
+            if st.button(icon, use_container_width=True):
+                page_info["active"] = not page_info["active"]
+                st.rerun()
+        with c2:
+            if st.button("🔄 回転させる", use_container_width=True):
+                page_info["rotate"] = (page_info["rotate"] + 90) % 360
+                st.rerun()
+
+    with col_nav2:
+        if st.button("次のページ ➡️", use_container_width=True):
+            if index < len(st.session_state.all_pages_data) - 1:
+                st.session_state.zoom_index = index + 1
+                st.rerun()
+
+    st.divider()
+
+    # 2. 画像の表示
+    display_img = page_info["img"].rotate(-page_info["rotate"], expand=True)
+    if not page_info["active"]:
+        display_img = display_img.convert("L")
+        st.warning("⚠️ このページは現在「削除設定」になっています")
+    
+    st.image(display_img, use_container_width=True)
+    st.write(f"ファイル: {page_info['filename']} (P.{page_info['page_num']})")
 
 # --- サイドバーの設定 ---
 with st.sidebar:
@@ -41,7 +76,7 @@ with st.sidebar:
 uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx"], accept_multiple_files=True)
 
 if uploaded_files:
-    existing_filenames = [p["filename"] for p in st.session_state.all_pages_data]
+    existing_filenames = {p["filename"] for p in st.session_state.all_pages_data}
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
         for uploaded_file in uploaded_files:
@@ -56,7 +91,6 @@ if uploaded_files:
                         subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
                         pdf_path = temp_dir_path / (input_path.stem + ".pdf")
                     
-                    # 🌟 拡大してもボケないように解像度を 1200 にアップ！
                     images = convert_from_path(pdf_path, size=(1200, None))
                     for i, img in enumerate(images):
                         label = f"📄 {uploaded_file.name} - P.{i+1}"
@@ -86,12 +120,13 @@ if st.session_state.all_pages_data:
             st.rerun()
 
     st.divider()
-    st.subheader("📝 ページごとの編集（🔍で特大表示！）")
+    st.subheader("📝 ページごとの編集（🔍ボタンで詳しく編集！）")
     
     rows = [st.session_state.all_pages_data[i:i+4] for i in range(0, len(st.session_state.all_pages_data), 4)]
     for row_idx, row_pages in enumerate(rows):
         cols = st.columns(4)
         for i, page in enumerate(row_pages):
+            global_idx = row_idx * 4 + i
             with cols[i]:
                 display_img = page["img"].rotate(-page["rotate"], expand=True)
                 if not page["active"]:
@@ -102,19 +137,19 @@ if st.session_state.all_pages_data:
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     icon = "🗑️" if page["active"] else "✅"
-                    if st.button(icon, key=f"act_{page['id']}_{row_idx}_{i}"):
+                    if st.button(icon, key=f"act_{page['id']}_{global_idx}"):
                         page["active"] = not page["active"]
                         st.rerun()
                 with b2:
-                    if st.button("🔄", key=f"rot_{page['id']}_{row_idx}_{i}"):
+                    if st.button("🔄", key=f"rot_{page['id']}_{global_idx}"):
                         page["rotate"] = (page["rotate"] + 90) % 360
                         st.rerun()
                 with b3:
-                    # 🌟 拡大ボタン
-                    if st.button("🔍", key=f"zom_{page['id']}_{row_idx}_{i}"):
-                        zoom_modal(page["img"], page["rotate"])
+                    if st.button("🔍", key=f"zom_{page['id']}_{global_idx}"):
+                        # 🌟 拡大モードを起動
+                        zoom_edit_modal(global_idx)
                 
-                st.caption(f"{'削除済' if not page['active'] else 'No.' + str(row_idx*4+i+1)}")
+                st.caption(f"{'削除済' if not page['active'] else 'No.' + str(global_idx+1)}")
 
     # --- 最終保存 ---
     st.divider()
