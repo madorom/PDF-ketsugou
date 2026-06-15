@@ -8,12 +8,17 @@ from pdf2image import convert_from_path
 
 st.set_page_config(page_title="PDF超編集スタジオ", layout="wide")
 
-st.title("🔍 PDF拡大・ページめくりスタジオ")
-st.write("ボタンでページをめくったり、虫めがねで大きくしたりできるよ！")
+st.title("🔍 PDF拡大・ページめくりスタジオ（倍率キープ版）")
+st.write("ページをめくっても、拡大した大きさがそのまま維持されるよ！")
 
-# --- 魔法の「しおり」を準備する（何ページ目か覚えておくため） ---
+# --- 魔法のメモ帳（セッションステート）の準備 ---
+# 1. ページ番号を覚えておくメモ
 if "page_numbers" not in st.session_state:
     st.session_state.page_numbers = {}
+
+# 2. 🌟【新機能】拡大率をアプリ全体で覚えておくメモ（最初は500サイズ）
+if "global_zoom" not in st.session_state:
+    st.session_state.global_zoom = 500
 
 uploaded_files = st.file_uploader(
     "ファイルをえらんでね", 
@@ -46,34 +51,33 @@ if uploaded_files:
             reader = PdfReader(current_pdf)
             num_pages = len(reader.pages)
 
-            # このファイルの現在のページを「しおり」から取り出す
             if f_key not in st.session_state.page_numbers:
                 st.session_state.page_numbers[f_key] = 1
             
             current_p = st.session_state.page_numbers[f_key]
 
-            # --- 左側の設定メニュー ---
+            # --- 画面を左右にわける ---
             col_settings, col_viewer = st.columns([1, 2])
             
             with col_settings:
                 st.write(f"全 **{num_pages}** ページ")
                 
-                # 🌟 【新機能】ページめくりボタン
+                # ページめくりボタン
                 c1, c2, c3 = st.columns([1, 2, 1])
                 with c1:
                     if st.button("⬅️ 前へ", key=f"prev_{f_key}"):
                         if st.session_state.page_numbers[f_key] > 1:
                             st.session_state.page_numbers[f_key] -= 1
-                            st.rerun() # 画面を更新してページをめくる
+                            st.rerun()
                 with c2:
                     st.write(f"**{st.session_state.page_numbers[f_key]} / {num_pages}**")
                 with c3:
                     if st.button("次へ ➡️", key=f"next_{f_key}"):
                         if st.session_state.page_numbers[f_key] < num_pages:
                             st.session_state.page_numbers[f_key] += 1
-                            st.rerun() # 画面を更新してページをめくる
+                            st.rerun()
 
-                # 🌟 スライダーでも動かせるようにする
+                # スライダー
                 if num_pages > 1:
                     st.session_state.page_numbers[f_key] = st.slider(
                         "スライダーでめくる", 1, num_pages, 
@@ -81,10 +85,15 @@ if uploaded_files:
                         key=f"slide_{f_key}"
                     )
 
-                # 🌟 【新機能】虫めがね（拡大）スライダー
-                zoom_size = st.slider("🔍 大きさをかえる（拡大）", 300, 1200, 500, step=50, key=f"zoom_{f_key}")
+                # 🌟【新機能】拡大率スライダー（共通のメモを使う）
+                st.session_state.global_zoom = st.slider(
+                    "🔍 大きさをかえる（すべてのページに反映）", 
+                    300, 1500, 
+                    value=st.session_state.global_zoom, # 共通のメモから数字を出す
+                    step=50, 
+                    key=f"zoom_slider_{f_key}" # キーはファイルごとに変えるけど中身は共通
+                )
 
-                # ページ選びと向き
                 selected_pages = st.multiselect(
                     "合体させるページ", range(1, num_pages + 1),
                     default=range(1, num_pages + 1), key=f"sel_{f_key}"
@@ -93,17 +102,15 @@ if uploaded_files:
                     "向き", [0, 90, 180, 270], index=0, key=f"rot_{f_key}", horizontal=True
                 )
             
-            # --- 右側のプレビュー表示 ---
             with col_viewer:
                 try:
                     with st.spinner("ページを表示中..."):
                         p_to_show = st.session_state.page_numbers[f_key]
-                        # PDFを画像にする
                         images = convert_from_path(current_pdf, first_page=p_to_show, last_page=p_to_show)
                         if images:
                             img = images[0].rotate(-rotate_val, expand=True)
-                            # 🌟 指定したズームサイズで表示する
-                            st.image(img, width=zoom_size)
+                            # 🌟 共通の拡大率で表示！
+                            st.image(img, width=st.session_state.global_zoom)
                 except:
                     st.error("プレビューが見られませんでした。")
 
@@ -142,6 +149,6 @@ if uploaded_files:
             result_path = temp_dir_path / "final.pdf"
             with open(result_path, "wb") as f:
                 merger.write(f)
-            st.success("🎉 完璧なPDFが完成しました！")
+            st.success("🎉 完成しました！")
             with open(result_path, "rb") as f:
-                st.download_button("完成したPDFをダウンロード", f.read(), "ultra_pdf.pdf")
+                st.download_button("完成したPDFをダウンロード", f.read(), "final_result.pdf")
