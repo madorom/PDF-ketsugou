@@ -20,13 +20,11 @@ if "all_pages_data" not in st.session_state:
 if "global_zoom" not in st.session_state:
     st.session_state.global_zoom = 200
 
-# --- 画像を文字列に変換する魔法（HTML表示用） ---
+# --- 画像を文字列に変換する魔法 ---
 def get_image_base64(img, rotation, active):
-    # 回転を適用
     img = img.rotate(-rotation, expand=True)
     if not active:
-        img = img.convert("L") # 削除済みは白黒に
-    
+        img = img.convert("L")
     buffered = BytesIO()
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
@@ -65,7 +63,6 @@ if uploaded_files:
                         subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
                         pdf_path = temp_dir_path / (input_path.stem + ".pdf")
                     
-                    # 高画質で読み取って保持
                     images = convert_from_path(pdf_path, size=(600, None))
                     for i, img in enumerate(images):
                         st.session_state.all_pages_data.append({
@@ -83,24 +80,28 @@ if uploaded_files:
 if st.session_state.all_pages_data:
     st.subheader("🤚 画像をドラッグして順番をいれかえる")
     
-    # 🌟 ドラッグ用のアイテムを作成（画像を含める）
+    # 🌟 ここが修正ポイント！ 辞書形式のリストを作ります
     sort_items_list = []
     for p in st.session_state.all_pages_data:
         img_b64 = get_image_base64(p["img"], p["rotate"], p["active"])
-        # HTMLを使って、ドラッグできる塊の中に画像を入れる
         html_content = f"""
-            <div style="text-align:center;">
-                <img src="data:image/png;base64,{img_b64}" width="{st.session_state.global_zoom}px" style="border-radius:5px; border:1px solid #ddd;"><br>
-                <small>{p['page_num']}ページ目</small>
+            <div style="text-align:center; background-color:white; padding:10px; border-radius:10px; border:2px solid #eee;">
+                <img src="data:image/png;base64,{img_b64}" width="{st.session_state.global_zoom}px"><br>
+                <small style="color:gray;">{p['filename']}<br>P.{p['page_num']}</small>
             </div>
         """
         sort_items_list.append({"id": p["id"], "content": html_content})
 
-    # 🌟 ドラッグ＆ドロップ実行
-    # 複数行に並ぶように設定
-    new_order_ids = sort_items(sort_items_list, direction="horizontal")
+    # 🌟 修正：multi_containers=True を使い、リストを一つのグループとして渡す
+    # 形式: [{"header": "名前", "items": [リスト]}]
+    container_data = [{"header": "📄 ページをドラッグして並び替え", "items": sort_items_list}]
+    
+    sorted_containers = sort_items(container_data, direction="horizontal", multi_containers=True)
 
-    # 並び順を反映
+    # 🌟 並び順を反映させる
+    # 返ってきたデータの最初のグループの items を取り出す
+    new_order_ids = [item["id"] for item in sorted_containers[0]["items"]]
+
     if new_order_ids != [p["id"] for p in st.session_state.all_pages_data]:
         id_to_data = {p["id"]: p for p in st.session_state.all_pages_data}
         st.session_state.all_pages_data = [id_to_data[oid] for oid in new_order_ids]
@@ -109,8 +110,7 @@ if st.session_state.all_pages_data:
     st.divider()
     st.subheader("📝 削除・回転・拡大ボタン")
     
-    # 編集用ボタンの並び（並べ替えた後の順番で表示）
-    # 4つずつ並べる
+    # ボタン操作エリア
     rows = [st.session_state.all_pages_data[i:i+4] for i in range(0, len(st.session_state.all_pages_data), 4)]
     for row_idx, row_pages in enumerate(rows):
         cols = st.columns(4)
@@ -130,7 +130,7 @@ if st.session_state.all_pages_data:
                 with b3:
                     if st.button("🔍", key=f"zoom_{page['id']}"):
                         zoom_modal(page["img"], page["rotate"])
-                st.caption(f"No.{global_idx+1}: {page['filename']}")
+                st.caption(f"No.{global_idx+1}: {page['page_num']}ページ目")
 
     # --- 最終保存 ---
     st.divider()
