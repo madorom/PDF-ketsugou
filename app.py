@@ -8,19 +8,15 @@ from pdf2image import convert_from_path
 
 st.set_page_config(page_title="PDF超編集スタジオ", layout="wide")
 
-st.title("✂️ PDF切り貼り・合体スタジオ")
-st.write("いらないページを捨てたり、向きを変えたり、自由自在に編集しよう！")
+st.title("📖 PDFページ確認・編集スタジオ")
+st.write("スライダーを動かして、全ページの中身を確認できるよ！")
 
 # 1. ファイルをアップロード
 uploaded_files = st.file_uploader(
-    "ファイルをえらんでね（Word, Excel, PPT, PDF）", 
+    "ファイルをえらんでね", 
     type=["pdf", "docx", "xlsx", "pptx"], 
     accept_multiple_files=True
 )
-
-# 状態を保存するための変数
-if "page_settings" not in st.session_state:
-    st.session_state.page_settings = {}
 
 if uploaded_files:
     ready_pdfs = []
@@ -30,6 +26,7 @@ if uploaded_files:
 
         for uploaded_file in uploaded_files:
             f_key = uploaded_file.name
+            st.divider() # 区切り線
             st.subheader(f"📂 ファイル: {f_key}")
             
             # --- ステップA: PDFに変換する ---
@@ -47,15 +44,24 @@ if uploaded_files:
             reader = PdfReader(current_pdf)
             num_pages = len(reader.pages)
 
-            # --- ステップB: ページの選択と回転 ---
+            # --- ステップB: ページの選択・回転・プレビュー ---
             col1, col2 = st.columns([1, 2])
             
             with col1:
-                st.write(f"このファイルは全部で **{num_pages}ページ** あります。")
+                st.write(f"全部で **{num_pages}ページ** あります。")
+                
+                # 🌟 新機能：見たいページをえらぶスライダー
+                preview_page = st.slider(
+                    "プレビューするページをめくる", 
+                    min_value=1, 
+                    max_value=num_pages, 
+                    value=1, 
+                    key=f"slide_{f_key}"
+                )
                 
                 # 使うページをえらぶ
                 selected_pages = st.multiselect(
-                    "使うページをえらんでね（空っぽにすると全部使います）",
+                    "合体させるページをえらんでね",
                     range(1, num_pages + 1),
                     default=range(1, num_pages + 1),
                     key=f"pages_{f_key}"
@@ -68,14 +74,20 @@ if uploaded_files:
                 )
             
             with col2:
-                # 代表して1ページ目だけプレビュー
+                # 🌟 スライダーで選んだページを画像にして見せる
                 try:
-                    images = convert_from_path(current_pdf, first_page=1, last_page=1, size=(250, None))
-                    if images:
-                        img = images[0].rotate(-rotate_val, expand=True)
-                        st.image(img, caption="1ページ目のプレビュー")
-                except:
-                    st.write("（プレビューは出せませんでした）")
+                    with st.spinner("ページを表示中..."):
+                        images = convert_from_path(
+                            current_pdf, 
+                            first_page=preview_page, # スライダーの数字を使う
+                            last_page=preview_page,  # スライダーの数字を使う
+                            size=(400, None)
+                        )
+                        if images:
+                            img = images[0].rotate(-rotate_val, expand=True)
+                            st.image(img, caption=f"{f_key} の {preview_page} ページ目")
+                except Exception as e:
+                    st.error("プレビューが出せませんでした。ファイルが重すぎるかもしれません。")
 
             ready_pdfs.append({
                 "path": current_pdf,
@@ -84,35 +96,29 @@ if uploaded_files:
                 "rotation": rotate_val
             })
 
-        st.divider()
-        
         # --- ステップC: 最終合体 ---
-        use_ocr = st.checkbox("OCR（文字をよみとる）をかける")
+        st.divider()
+        use_ocr = st.checkbox("OCR（文字をよみとる）を全ページにかける")
         
-        if st.button("🚀 編集をすべて反映して合体！", type="primary"):
+        if st.button("🚀 この内容でPDFを作成する", type="primary", use_container_width=True):
             merger = PdfWriter()
             
             for item in ready_pdfs:
                 reader = PdfReader(item["path"])
                 writer = PdfWriter()
                 
-                # 選んだページだけを抜き出す
-                # プログラミングは0から数えるので -1 します
                 pages_to_add = [p - 1 for p in item["keep_pages"]]
-                
                 for idx in pages_to_add:
                     page = reader.pages[idx]
-                    page.rotate(item["rotation"]) # 回転させる
+                    page.rotate(item["rotation"])
                     writer.add_page(page)
                 
-                # 一時保存
                 temp_output = temp_dir_path / f"mod_{item['name']}.pdf"
                 with open(temp_output, "wb") as f:
                     writer.write(f)
                 
                 final_path = temp_output
 
-                # OCRが必要な場合
                 if use_ocr:
                     st.write(f"👁️ {item['name']} を読み取り中...")
                     ocr_pdf = temp_dir_path / f"ocr_{item['name']}.pdf"
@@ -122,11 +128,10 @@ if uploaded_files:
                 
                 merger.append(str(final_path))
 
-            # 最後の保存
             result_path = temp_dir_path / "final.pdf"
             with open(result_path, "wb") as f:
                 merger.write(f)
             
-            st.success("🎉 完ぺきです！いらないページを捨てて合体しました！")
+            st.success("🎉 完ぺきなPDFができあがりました！")
             with open(result_path, "rb") as f:
-                st.download_button("完成したPDFをもらう", f.read(), "edited_document.pdf")
+                st.download_button("完成したPDFをダウンロード", f.read(), "my_edited_pdf.pdf")
