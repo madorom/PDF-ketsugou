@@ -8,8 +8,12 @@ from pdf2image import convert_from_path
 
 st.set_page_config(page_title="PDF超編集スタジオ", layout="wide")
 
-st.title("📖 PDFページ確認・編集スタジオ")
-st.write("スライダーを動かして、全ページの中身を確認できるよ！")
+st.title("🔍 PDF拡大・ページめくりスタジオ")
+st.write("ボタンでページをめくったり、虫めがねで大きくしたりできるよ！")
+
+# --- 魔法の「しおり」を準備する（何ページ目か覚えておくため） ---
+if "page_numbers" not in st.session_state:
+    st.session_state.page_numbers = {}
 
 uploaded_files = st.file_uploader(
     "ファイルをえらんでね", 
@@ -28,6 +32,7 @@ if uploaded_files:
             st.divider()
             st.subheader(f"📂 ファイル: {f_key}")
             
+            # PDFに変換する処理
             input_path = temp_dir_path / uploaded_file.name
             with open(input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
@@ -41,62 +46,76 @@ if uploaded_files:
             reader = PdfReader(current_pdf)
             num_pages = len(reader.pages)
 
-            col1, col2 = st.columns([1, 2])
+            # このファイルの現在のページを「しおり」から取り出す
+            if f_key not in st.session_state.page_numbers:
+                st.session_state.page_numbers[f_key] = 1
             
-            with col1:
-                st.write(f"全部で **{num_pages}ページ** あります。")
+            current_p = st.session_state.page_numbers[f_key]
+
+            # --- 左側の設定メニュー ---
+            col_settings, col_viewer = st.columns([1, 2])
+            
+            with col_settings:
+                st.write(f"全 **{num_pages}** ページ")
                 
-                # --- 修正したスライダーの部分 ---
+                # 🌟 【新機能】ページめくりボタン
+                c1, c2, c3 = st.columns([1, 2, 1])
+                with c1:
+                    if st.button("⬅️ 前へ", key=f"prev_{f_key}"):
+                        if st.session_state.page_numbers[f_key] > 1:
+                            st.session_state.page_numbers[f_key] -= 1
+                            st.rerun() # 画面を更新してページをめくる
+                with c2:
+                    st.write(f"**{st.session_state.page_numbers[f_key]} / {num_pages}**")
+                with c3:
+                    if st.button("次へ ➡️", key=f"next_{f_key}"):
+                        if st.session_state.page_numbers[f_key] < num_pages:
+                            st.session_state.page_numbers[f_key] += 1
+                            st.rerun() # 画面を更新してページをめくる
+
+                # 🌟 スライダーでも動かせるようにする
                 if num_pages > 1:
-                    preview_page = st.slider(
-                        "プレビューするページをめくる", 
-                        min_value=1, 
-                        max_value=num_pages, 
-                        value=1, 
+                    st.session_state.page_numbers[f_key] = st.slider(
+                        "スライダーでめくる", 1, num_pages, 
+                        value=st.session_state.page_numbers[f_key],
                         key=f"slide_{f_key}"
                     )
-                else:
-                    preview_page = 1
-                # ------------------------------
 
+                # 🌟 【新機能】虫めがね（拡大）スライダー
+                zoom_size = st.slider("🔍 大きさをかえる（拡大）", 300, 1200, 500, step=50, key=f"zoom_{f_key}")
+
+                # ページ選びと向き
                 selected_pages = st.multiselect(
-                    "合体させるページをえらんでね",
-                    range(1, num_pages + 1),
-                    default=range(1, num_pages + 1),
-                    key=f"pages_{f_key}"
+                    "合体させるページ", range(1, num_pages + 1),
+                    default=range(1, num_pages + 1), key=f"sel_{f_key}"
                 )
-                
                 rotate_val = st.radio(
-                    "向きをかえる", [0, 90, 180, 270], index=0, 
-                    key=f"rot_{f_key}", horizontal=True
+                    "向き", [0, 90, 180, 270], index=0, key=f"rot_{f_key}", horizontal=True
                 )
             
-            with col2:
+            # --- 右側のプレビュー表示 ---
+            with col_viewer:
                 try:
-                    with st.spinner("表示中..."):
-                        images = convert_from_path(
-                            current_pdf, 
-                            first_page=preview_page, 
-                            last_page=preview_page,
-                            size=(400, None)
-                        )
+                    with st.spinner("ページを表示中..."):
+                        p_to_show = st.session_state.page_numbers[f_key]
+                        # PDFを画像にする
+                        images = convert_from_path(current_pdf, first_page=p_to_show, last_page=p_to_show)
                         if images:
                             img = images[0].rotate(-rotate_val, expand=True)
-                            st.image(img, caption=f"{f_key} の {preview_page} ページ目")
+                            # 🌟 指定したズームサイズで表示する
+                            st.image(img, width=zoom_size)
                 except:
-                    st.error("プレビューが出せませんでした。")
+                    st.error("プレビューが見られませんでした。")
 
             ready_pdfs.append({
-                "path": current_pdf,
-                "name": f_key,
-                "keep_pages": selected_pages,
-                "rotation": rotate_val
+                "path": current_pdf, "name": f_key,
+                "keep_pages": selected_pages, "rotation": rotate_val
             })
 
+        # --- 合体ボタン ---
         st.divider()
-        use_ocr = st.checkbox("OCR（文字をよみとる）を全ページにかける")
-        
-        if st.button("🚀 この内容でPDFを作成する", type="primary", use_container_width=True):
+        use_ocr = st.checkbox("OCR（文字を読み取る）をかける")
+        if st.button("🚀 この内容でPDFを合体する", type="primary", use_container_width=True):
             merger = PdfWriter()
             for item in ready_pdfs:
                 reader = PdfReader(item["path"])
@@ -123,6 +142,6 @@ if uploaded_files:
             result_path = temp_dir_path / "final.pdf"
             with open(result_path, "wb") as f:
                 merger.write(f)
-            st.success("🎉 完成しました！")
+            st.success("🎉 完璧なPDFが完成しました！")
             with open(result_path, "rb") as f:
-                st.download_button("完成したPDFをダウンロード", f.read(), "my_edited_pdf.pdf")
+                st.download_button("完成したPDFをダウンロード", f.read(), "ultra_pdf.pdf")
