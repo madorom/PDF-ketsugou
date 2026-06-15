@@ -10,7 +10,7 @@ from streamlit_sortables import sort_items
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
 st.title("🖼️ PDF並び替え・編集スタジオ")
-st.write("上のラベルをドラッグして順番をかえると、下のページ順も入れ替わるよ！")
+st.write("ゴミ箱に入れると、上の並び替えメニューからも消えるよ！")
 
 # --- 魔法のメモ帳（セッションステート） ---
 if "all_pages_data" not in st.session_state:
@@ -54,7 +54,7 @@ if uploaded_files:
                     
                     images = convert_from_path(pdf_path, size=(600, None))
                     for i, img in enumerate(images):
-                        # ユニークなラベルを作る（これがドラッグ用になる）
+                        # ユニークなラベルを作る
                         label = f"📄 {uploaded_file.name} - P.{i+1}"
                         st.session_state.all_pages_data.append({
                             "id": label, 
@@ -69,25 +69,31 @@ if uploaded_files:
 
 # --- メインエリア：ドラッグ＆ドロップと編集 ---
 if st.session_state.all_pages_data:
-    st.subheader("🤚 順番をいれかえる（ラベルをドラッグ！）")
+    st.subheader("🤚 順番をいれかえる（使うページだけ表示）")
     
-    # 🌟 エラー回避：文字（ID）だけのリストを渡す
-    page_labels = [p["id"] for p in st.session_state.all_pages_data]
+    # 🌟 使うページ（active=True）のラベルだけを取り出す
+    active_labels = [p["id"] for p in st.session_state.all_pages_data if p["active"]]
     
-    # 文字のリストで並び替えを実行
-    sorted_labels = sort_items(page_labels, direction="horizontal")
+    if active_labels:
+        # 並び替えを実行
+        sorted_active_labels = sort_items(active_labels, direction="horizontal")
 
-    # 並び順を反映
-    if sorted_labels != page_labels:
-        # ラベルを元にデータを並び替える
-        label_to_data = {p["id"]: p for p in st.session_state.all_pages_data}
-        st.session_state.all_pages_data = [label_to_data[lbl] for lbl in sorted_labels]
-        st.rerun()
+        # 並び順を反映させる（activeなものだけ順番を変え、inactiveなものは後ろにキープ）
+        if sorted_active_labels != active_labels:
+            active_data_map = {p["id"]: p for p in st.session_state.all_pages_data if p["active"]}
+            inactive_data = [p for p in st.session_state.all_pages_data if not p["active"]]
+            
+            # 新しい順番のactiveデータ + そのままのinactiveデータ
+            new_all_data = [active_data_map[lbl] for lbl in sorted_active_labels] + inactive_data
+            st.session_state.all_pages_data = new_all_data
+            st.rerun()
+    else:
+        st.write("（使うページがありません。下の「復活」ボタンで戻せるよ！）")
 
     st.divider()
-    st.subheader("📝 ページごとの編集（削除・回転・拡大）")
+    st.subheader("📝 ページごとの編集")
     
-    # ページをグリッドで表示
+    # ページを表示する
     rows = [st.session_state.all_pages_data[i:i+4] for i in range(0, len(st.session_state.all_pages_data), 4)]
     for row_idx, row_pages in enumerate(rows):
         cols = st.columns(4)
@@ -96,53 +102,62 @@ if st.session_state.all_pages_data:
                 # 画像の表示
                 display_img = page["img"].rotate(-page["rotate"], expand=True)
                 if not page["active"]:
-                    display_img = display_img.convert("L")
+                    display_img = display_img.convert("L") # 消したページは白黒
                 
                 st.image(display_img, width=st.session_state.global_zoom)
-                st.caption(f"No.{row_idx*4+i+1}: {page['id']}")
                 
-                # 操作ボタン
+                # ボタンの配置
                 b1, b2, b3 = st.columns(3)
                 with b1:
-                    if st.button("🗑️", key=f"del_{page['id']}"):
+                    # ゴミ箱または復活ボタン
+                    icon = "🗑️" if page["active"] else "✅"
+                    if st.button(icon, key=f"btn_act_{page['id']}_{row_idx}_{i}"):
                         page["active"] = not page["active"]
                         st.rerun()
                 with b2:
-                    if st.button("🔄", key=f"rot_{page['id']}"):
+                    if st.button("🔄", key=f"btn_rot_{page['id']}_{row_idx}_{i}"):
                         page["rotate"] = (page["rotate"] + 90) % 360
                         st.rerun()
                 with b3:
-                    if st.button("🔍", key=f"zoom_{page['id']}"):
+                    if st.button("🔍", key=f"btn_zom_{page['id']}_{row_idx}_{i}"):
                         zoom_modal(page["img"], page["rotate"])
+                
+                st.caption(f"{'削除済み' if not page['active'] else 'No.' + str(row_idx*4+i+1)}: {page['id']}")
 
     # --- 最終保存 ---
     st.divider()
-    if st.button("🚀 この順番でPDFを作成して保存", type="primary", use_container_width=True):
+    if st.button("🚀 この内容でPDFを作成して保存", type="primary", use_container_width=True):
         final_merger = PdfWriter()
-        with tempfile.TemporaryDirectory() as save_dir:
-            save_dir_path = Path(save_dir)
-            for page in st.session_state.all_pages_data:
-                if page["active"]:
+        active_pages = [p for p in st.session_state.all_pages_data if p["active"]]
+        
+        if not active_pages:
+            st.error("使うページを1つ以上選んでね！")
+        else:
+            with tempfile.TemporaryDirectory() as save_dir:
+                save_dir_path = Path(save_dir)
+                for idx, page in enumerate(active_pages):
                     reader = PdfReader(page["pdf_path"])
                     temp_writer = PdfWriter()
                     page_obj = reader.pages[page["page_num"] - 1]
                     page_obj.rotate(page["rotate"])
                     temp_writer.add_page(page_obj)
-                    temp_p = save_dir_path / f"temp_{hash(page['id'])}.pdf"
+                    
+                    temp_p = save_dir_path / f"temp_{idx}.pdf"
                     with open(temp_p, "wb") as f:
                         temp_writer.write(f)
                     
                     final_path = temp_p
                     if use_ocr:
-                        ocr_p = save_dir_path / f"ocr_{hash(page['id'])}.pdf"
+                        st.write(f"👁️ OCR中: {page['id']}")
+                        ocr_p = save_dir_path / f"ocr_{idx}.pdf"
                         subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
                         final_path = ocr_p
                     final_merger.append(str(final_path))
-            
-            result_file = save_dir_path / "final.pdf"
-            with open(result_file, "wb") as f:
-                final_merger.write(f)
-            
-            st.success("🎉 完成！")
-            with open(result_file, "rb") as f:
-                st.download_button("📥 編集済みPDFをダウンロード", f.read(), "merged.pdf")
+                
+                result_file = save_dir_path / "final.pdf"
+                with open(result_file, "wb") as f:
+                    final_merger.write(f)
+                
+                st.success("🎉 完成！")
+                with open(result_file, "rb") as f:
+                    st.download_button("📥 編集済みPDFをダウンロード", f.read(), "final_document.pdf")
