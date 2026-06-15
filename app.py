@@ -11,8 +11,7 @@ from streamlit_sortables import sort_items
 # ページの基本設定
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🛡️ PDFプロ・編集スタジオ（完全修正版）")
-st.write("エラーをすべて直したよ！拡大画面で確認しながら、スイスイ編集してね。")
+st.title("🛡️ PDF編集")
 
 # --- 1. 魔法のメモ帳（セッションステート）の準備 ---
 if "all_pages_data" not in st.session_state:
