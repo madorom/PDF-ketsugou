@@ -3,24 +3,24 @@ import subprocess
 import os
 import tempfile
 import io
+import gc # 🌟 お掃除係（メモリ解放）
 from pypdf import PdfWriter, PdfReader
 from pathlib import Path
 from pdf2image import convert_from_path
 from streamlit_sortables import sort_items
 
-# ページの基本設定
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🛡️ PDFプロ・編集スタジオ（超軽量・安定版）")
-st.write("メモリの使い方を天才的に工夫したよ！重たいファイルも怖くない！")
+st.title("🛡️ PDFプロ・編集スタジオ（究極安定版）")
+st.write("大量のページでも壊れないように、画像を特殊な方法で圧縮して保存するよ！")
 
 # --- 1. 魔法のメモ帳（セッションステート） ---
 if "page_list" not in st.session_state:
-    st.session_state.page_list = [] # ページの情報
+    st.session_state.page_list = []
 if "file_vault" not in st.session_state:
-    st.session_state.file_vault = {} # 🌟 ファイルのデータ本体を1回だけ保存する金庫
+    st.session_state.file_vault = {}
 if "global_zoom" not in st.session_state:
-    st.session_state.global_zoom = 200
+    st.session_state.global_zoom = 180
 if "active_zoom_index" not in st.session_state:
     st.session_state.active_zoom_index = None
 
@@ -61,14 +61,16 @@ def zoom_edit_modal():
             st.rerun()
 
     st.divider()
-    # 🌟 拡大画面ではその場で画像を生成してメモリを節約！
-    pdf_data = st.session_state.file_vault[page["filename"]]
-    img = convert_from_path(io.BytesIO(pdf_data), first_page=page["page_num"], last_page=page["page_num"], size=(1000, None))[0]
-    display_img = img.rotate(-page["rotate"], expand=True)
-    if not page["active"]:
-        display_img = display_img.convert("L")
-        st.warning("⚠️ 削除設定中")
-    st.image(display_img, use_container_width=True)
+    # 🌟 拡大時だけ高画質で読み込み
+    try:
+        pdf_data = st.session_state.file_vault[page["filename"]]
+        img = convert_from_path(io.BytesIO(pdf_data), first_page=page["page_num"], last_page=page["page_num"], size=(1200, None))[0]
+        display_img = img.rotate(-page["rotate"], expand=True)
+        if not page["active"]:
+            display_img = display_img.convert("L")
+        st.image(display_img, use_container_width=True)
+    except:
+        st.error("画像の読み込みに失敗しました。")
 
 if st.session_state.active_zoom_index is not None:
     zoom_edit_modal()
@@ -80,12 +82,12 @@ with st.sidebar:
     st.divider()
     use_ocr = st.checkbox("OCRをかける")
     if st.button("♻️ 最初からやり直す"):
-        st.session_state.page_list = []
-        st.session_state.file_vault = {}
-        st.session_state.active_zoom_index = None
+        for key in ["page_list", "file_vault", "active_zoom_index"]:
+            st.session_state[key] = [] if key=="page_list" else ({} if key=="file_vault" else None)
+        gc.collect() # 掃除
         st.rerun()
 
-# --- 4. ファイル読み込み ---
+# --- 4. ファイル読み込みと「圧縮」画像化 ---
 uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx", "xlsm"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -100,40 +102,49 @@ if uploaded_files:
                     
                     pdf_path = input_path
                     if input_path.suffix.lower() != ".pdf":
-                        subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
+                        subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)], timeout=60)
                         pdf_path = temp_dir_path / (input_path.stem + ".pdf")
                     
                     if pdf_path.exists():
                         with open(pdf_path, "rb") as f:
                             pdf_bytes = f.read()
-                        
-                        # 🌟 金庫に本体を保存（1回だけ！）
                         st.session_state.file_vault[uploaded_file.name] = pdf_bytes
                         
-                        # 🌟 一覧用の「超軽量」画像（300ピクセル）だけ作成
-                        imgs = convert_from_path(pdf_path, size=(300, None))
-                        for i, img in enumerate(imgs):
+                        # 🌟 1ページずつ画像にして「圧縮JPEG」として保存（これがメモリ節約の要！）
+                        reader = PdfReader(io.BytesIO(pdf_bytes))
+                        for i in range(len(reader.pages)):
+                            page_num = i + 1
+                            # 1ページだけ画像化
+                            img = convert_from_path(io.BytesIO(pdf_bytes), first_page=page_num, last_page=page_num, size=(300, None))[0]
+                            
+                            # 画像をJPEG形式のバイナリに圧縮
+                            buf = io.BytesIO()
+                            img.save(buf, format="JPEG", quality=60) # 画質を少し落として軽量化
+                            thumb_bytes = buf.getvalue()
+                            
                             st.session_state.page_list.append({
                                 "id": f"{uploaded_file.name}_{i}_{os.urandom(2).hex()}",
                                 "filename": uploaded_file.name,
-                                "page_num": i + 1,
-                                "thumb": img, # 軽い画像
+                                "page_num": page_num,
+                                "thumb_bytes": thumb_bytes, # 🌟 圧縮データで持つ
                                 "active": True,
                                 "rotate": 0
                             })
+                            del img, buf # 使い終わったら即消去
+                        gc.collect() # ページごとに掃除
                 st.rerun()
 
-# --- 5. 並び替えと編集 ---
+# --- 5. メイン画面 ---
 if st.session_state.page_list:
     st.subheader("🤚 順番をいれかえる")
-    active_labels = [p["id"] for p in st.session_state.page_list if p["active"]]
+    active_ids = [p["id"] for p in st.session_state.page_list if p["active"]]
     
-    if active_labels:
-        sorted_ids = sort_items(active_labels, direction="horizontal")
-        if sorted_ids != active_labels:
+    if active_ids:
+        new_ids = sort_items(active_ids, direction="horizontal")
+        if new_ids != active_ids:
             id_map = {p["id"]: p for p in st.session_state.page_list}
-            inactive_list = [p for p in st.session_state.page_list if not p["active"]]
-            st.session_state.page_list = [id_map[sid] for sid in sorted_ids] + inactive_list
+            inactive = [p for p in st.session_state.page_list if not p["active"]]
+            st.session_state.page_list = [id_map[nid] for nid in new_ids] + inactive
             st.rerun()
 
     st.divider()
@@ -143,9 +154,15 @@ if st.session_state.page_list:
     for row_idx, row_pages in enumerate(rows):
         cols = st.columns(6)
         for i, page in enumerate(row_pages):
-            idx = (st.session_state.page_list.index(page))
             with cols[i]:
-                d_img = page["thumb"].rotate(-page["rotate"], expand=True)
+                # 🌟 圧縮データから画像に戻して表示
+                img = io.BytesIO(page["thumb_bytes"])
+                d_img = convert_from_path(img)[0] if isinstance(page["thumb_bytes"], bytes) else page["thumb_bytes"]
+                # 実際にはもっと単純に
+                from PIL import Image
+                d_img = Image.open(io.BytesIO(page["thumb_bytes"]))
+                
+                d_img = d_img.rotate(-page["rotate"], expand=True)
                 if not page["active"]: d_img = d_img.convert("L")
                 st.image(d_img, width=st.session_state.global_zoom)
                 
@@ -153,15 +170,13 @@ if st.session_state.page_list:
                 with b1:
                     icon = "🗑️" if page["active"] else "✅"
                     if st.button(icon, key=f"a_{page['id']}"):
-                        page["active"] = not page["active"]
-                        st.rerun()
+                        page["active"] = not page["active"]; st.rerun()
                 with b2:
                     if st.button("🔄", key=f"r_{page['id']}"):
-                        page["rotate"] = (page["rotate"] + 90) % 360
-                        st.rerun()
+                        page["rotate"] = (page["rotate"] + 90) % 360; st.rerun()
                 with b3:
                     if st.button("🔍", key=f"z_{page['id']}"):
-                        st.session_state.active_zoom_index = idx
+                        st.session_state.active_zoom_index = st.session_state.page_list.index(page)
                         st.rerun()
 
     # --- 6. 最終合体 ---
@@ -190,6 +205,7 @@ if st.session_state.page_list:
                         subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(temp_p), str(ocr_p)])
                         temp_p = ocr_p
                     final_merger.append(str(temp_p))
+                    gc.collect() # 合体中も掃除
                 
                 out_io = io.BytesIO()
                 final_merger.write(out_io)
