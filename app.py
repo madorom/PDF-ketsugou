@@ -11,9 +11,10 @@ from streamlit_sortables import sort_items
 # ページの基本設定
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🛡️ PDFスタジオ")
+st.title("🛡️ PDFプロ・編集スタジオ（軽量・安定版）")
+st.write("画像のサイズを少し軽くして、エラーが出ないように調整したよ！")
 
-# --- 1. 魔法のメモ帳（セッションステート） ---
+# --- 1. 魔法のメモ帳（セッションステート）の準備 ---
 if "all_pages_data" not in st.session_state:
     st.session_state.all_pages_data = []
 if "global_zoom" not in st.session_state:
@@ -34,7 +35,7 @@ def zoom_edit_modal():
     
     col_nav1, col_edit, col_nav2, col_close = st.columns([1, 2, 1, 1])
     with col_nav1:
-        if st.button("⬅️ 前へ", use_container_width=True, key="modal_prev_btn"):
+        if st.button("⬅️ 前へ", use_container_width=True, key="m_prev_btn"):
             if index > 0:
                 st.session_state.active_zoom_index = index - 1
                 st.rerun()
@@ -42,24 +43,25 @@ def zoom_edit_modal():
         c1, c2 = st.columns(2)
         with c1:
             icon = "🗑️ 削除" if page_info["active"] else "✅ 復活"
-            if st.button(icon, use_container_width=True, key="modal_delete_btn"):
+            if st.button(icon, use_container_width=True, key="m_del_btn"):
                 page_info["active"] = not page_info["active"]
                 st.rerun()
         with c2:
-            if st.button("🔄 回転", use_container_width=True, key="modal_rotate_btn"):
+            if st.button("🔄 回転", use_container_width=True, key="m_rot_btn"):
                 page_info["rotate"] = (page_info["rotate"] + 90) % 360
                 st.rerun()
     with col_nav2:
-        if st.button("次へ ➡️", use_container_width=True, key="modal_next_btn"):
+        if st.button("次へ ➡️", use_container_width=True, key="m_next_btn"):
             if index < len(st.session_state.all_pages_data) - 1:
                 st.session_state.active_zoom_index = index + 1
                 st.rerun()
     with col_close:
-        if st.button("✖️ 閉じる", use_container_width=True, key="modal_close_btn", type="primary"):
+        if st.button("✖️ 閉じる", use_container_width=True, key="m_close_btn", type="primary"):
             st.session_state.active_zoom_index = None
             st.rerun()
 
     st.divider()
+    # 画像の表示
     display_img = page_info["img"].rotate(-page_info["rotate"], expand=True)
     if not page_info["active"]:
         display_img = display_img.convert("L")
@@ -80,12 +82,8 @@ with st.sidebar:
         st.session_state.active_zoom_index = None
         st.rerun()
 
-# --- 4. ファイルの読み込み（xlsmを追加しました！） ---
-uploaded_files = st.file_uploader(
-    "ファイルをえらんでね", 
-    type=["pdf", "docx", "xlsx", "pptx", "xlsm"], 
-    accept_multiple_files=True
-)
+# --- 4. ファイルの読み込み ---
+uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx", "xlsm"], accept_multiple_files=True)
 
 if uploaded_files:
     current_files = [p["filename"] for p in st.session_state.all_pages_data]
@@ -107,7 +105,8 @@ if uploaded_files:
                         with open(pdf_path, "rb") as f:
                             pdf_bytes = f.read()
                         try:
-                            imgs = convert_from_path(pdf_path, size=(1200, None))
+                            # 🌟 ここがポイント：sizeを1200から800に下げて軽くしました
+                            imgs = convert_from_path(pdf_path, size=(800, None))
                             for i, img in enumerate(imgs):
                                 st.session_state.all_pages_data.append({
                                     "id": f"{uploaded_file.name}_{i}_{os.urandom(4).hex()}", 
@@ -151,15 +150,15 @@ if st.session_state.all_pages_data:
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     icon = "🗑️" if page["active"] else "✅"
-                    if st.button(icon, key=f"action_del_{page['id']}"):
+                    if st.button(icon, key=f"a_btn_{page['id']}"):
                         page["active"] = not page["active"]
                         st.rerun()
                 with b2:
-                    if st.button("🔄", key=f"action_rot_{page['id']}"):
+                    if st.button("🔄", key=f"r_btn_{page['id']}"):
                         page["rotate"] = (page["rotate"] + 90) % 360
                         st.rerun()
                 with b3:
-                    if st.button("🔍", key=f"action_zoom_{page['id']}"):
+                    if st.button("🔍", key=f"z_btn_{page['id']}"):
                         st.session_state.active_zoom_index = idx
                         st.rerun()
                 st.caption(f"{'削除済' if not page['active'] else 'No.' + str(idx+1)}")
@@ -167,7 +166,7 @@ if st.session_state.all_pages_data:
     # --- 6. 最終合体処理 ---
     st.divider()
     st.subheader("🏁 仕上げ")
-    custom_filename = st.text_input("💾 保存するファイルの名前を決めてね", value="merged_document")
+    custom_filename = st.text_input("💾 保存するファイルの名前", value="merged_document")
     
     if st.button("🚀 PDFを作成して保存", type="primary", use_container_width=True):
         active_pages = [p for p in st.session_state.all_pages_data if p["active"]]
@@ -191,7 +190,6 @@ if st.session_state.all_pages_data:
                     
                     final_path = temp_p
                     if use_ocr:
-                        st.write(f"👁️ OCR中... {page['id']}")
                         ocr_p = save_dir_path / f"ocr_{idx}.pdf"
                         subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
                         final_path = ocr_p
@@ -199,7 +197,6 @@ if st.session_state.all_pages_data:
                 
                 output = io.BytesIO()
                 final_merger.write(output)
-                
-                final_name = custom_filename if custom_filename.endswith(".pdf") else f"{custom_filename}.pdf"
-                st.success(f"🎉 「{final_name}」が完成しました！")
-                st.download_button("📥 ダウンロードする", output.getvalue(), final_name, "application/pdf")
+                f_name = custom_filename if custom_filename.endswith(".pdf") else f"{custom_filename}.pdf"
+                st.success(f"🎉 「{f_name}」完成！")
+                st.download_button("📥 ダウンロード", output.getvalue(), f_name, "application/pdf")
