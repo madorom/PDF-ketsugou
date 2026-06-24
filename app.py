@@ -11,61 +11,63 @@ from streamlit_sortables import sort_items
 # ページの基本設定
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🛡️ PDFプロ・編集スタジオ（軽量・安定版）")
-st.write("画像のサイズを少し軽くして、エラーが出ないように調整したよ！")
+st.title("🛡️ PDFプロ・編集スタジオ（超軽量・安定版）")
+st.write("メモリの使い方を天才的に工夫したよ！重たいファイルも怖くない！")
 
-# --- 1. 魔法のメモ帳（セッションステート）の準備 ---
-if "all_pages_data" not in st.session_state:
-    st.session_state.all_pages_data = []
+# --- 1. 魔法のメモ帳（セッションステート） ---
+if "page_list" not in st.session_state:
+    st.session_state.page_list = [] # ページの情報
+if "file_vault" not in st.session_state:
+    st.session_state.file_vault = {} # 🌟 ファイルのデータ本体を1回だけ保存する金庫
 if "global_zoom" not in st.session_state:
-    st.session_state.global_zoom = 250
+    st.session_state.global_zoom = 200
 if "active_zoom_index" not in st.session_state:
     st.session_state.active_zoom_index = None
 
 # --- 2. 拡大編集画面（ダイアログ） ---
 @st.dialog("ページを編集・確認", width="large")
 def zoom_edit_modal():
-    index = st.session_state.active_zoom_index
-    if index is None or index >= len(st.session_state.all_pages_data):
+    idx = st.session_state.active_zoom_index
+    if idx is None or idx >= len(st.session_state.page_list):
         st.session_state.active_zoom_index = None
         st.rerun()
         return
 
-    page_info = st.session_state.all_pages_data[index]
+    page = st.session_state.page_list[idx]
     
-    col_nav1, col_edit, col_nav2, col_close = st.columns([1, 2, 1, 1])
-    with col_nav1:
-        if st.button("⬅️ 前へ", use_container_width=True, key="m_prev_btn"):
-            if index > 0:
-                st.session_state.active_zoom_index = index - 1
-                st.rerun()
-    with col_edit:
+    col1, col2, col3, col4 = st.columns([1, 2, 1, 1])
+    with col1:
+        if st.button("⬅️ 前へ", key="m_prev") and idx > 0:
+            st.session_state.active_zoom_index = idx - 1
+            st.rerun()
+    with col2:
         c1, c2 = st.columns(2)
         with c1:
-            icon = "🗑️ 削除" if page_info["active"] else "✅ 復活"
-            if st.button(icon, use_container_width=True, key="m_del_btn"):
-                page_info["active"] = not page_info["active"]
+            icon = "🗑️ 削除" if page["active"] else "✅ 復活"
+            if st.button(icon, key="m_del"):
+                page["active"] = not page["active"]
                 st.rerun()
         with c2:
-            if st.button("🔄 回転", use_container_width=True, key="m_rot_btn"):
-                page_info["rotate"] = (page_info["rotate"] + 90) % 360
+            if st.button("🔄 回転", key="m_rot"):
+                page["rotate"] = (page["rotate"] + 90) % 360
                 st.rerun()
-    with col_nav2:
-        if st.button("次へ ➡️", use_container_width=True, key="m_next_btn"):
-            if index < len(st.session_state.all_pages_data) - 1:
-                st.session_state.active_zoom_index = index + 1
-                st.rerun()
-    with col_close:
-        if st.button("✖️ 閉じる", use_container_width=True, key="m_close_btn", type="primary"):
+    with col3:
+        if st.button("次へ ➡️", key="m_next") and idx < len(st.session_state.page_list) - 1:
+            st.session_state.active_zoom_index = idx + 1
+            st.rerun()
+    with col4:
+        if st.button("✖️ 閉じる", key="m_close", type="primary"):
             st.session_state.active_zoom_index = None
             st.rerun()
 
     st.divider()
-    # 画像の表示
-    display_img = page_info["img"].rotate(-page_info["rotate"], expand=True)
-    if not page_info["active"]:
+    # 🌟 拡大画面ではその場で画像を生成してメモリを節約！
+    pdf_data = st.session_state.file_vault[page["filename"]]
+    img = convert_from_path(io.BytesIO(pdf_data), first_page=page["page_num"], last_page=page["page_num"], size=(1000, None))[0]
+    display_img = img.rotate(-page["rotate"], expand=True)
+    if not page["active"]:
         display_img = display_img.convert("L")
-        st.warning("⚠️ このページは削除設定中です")
+        st.warning("⚠️ 削除設定中")
     st.image(display_img, use_container_width=True)
 
 if st.session_state.active_zoom_index is not None:
@@ -74,21 +76,21 @@ if st.session_state.active_zoom_index is not None:
 # --- 3. サイドバー ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    st.session_state.global_zoom = st.slider("🔍 一覧サイズ", 100, 500, st.session_state.global_zoom)
+    st.session_state.global_zoom = st.slider("🔍 一覧サイズ", 80, 400, st.session_state.global_zoom)
     st.divider()
     use_ocr = st.checkbox("OCRをかける")
     if st.button("♻️ 最初からやり直す"):
-        st.session_state.all_pages_data = []
+        st.session_state.page_list = []
+        st.session_state.file_vault = {}
         st.session_state.active_zoom_index = None
         st.rerun()
 
-# --- 4. ファイルの読み込み ---
+# --- 4. ファイル読み込み ---
 uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx", "xlsm"], accept_multiple_files=True)
 
 if uploaded_files:
-    current_files = [p["filename"] for p in st.session_state.all_pages_data]
     for uploaded_file in uploaded_files:
-        if uploaded_file.name not in current_files:
+        if uploaded_file.name not in st.session_state.file_vault:
             with st.spinner(f"{uploaded_file.name} を準備中..."):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_dir_path = Path(temp_dir)
@@ -104,99 +106,93 @@ if uploaded_files:
                     if pdf_path.exists():
                         with open(pdf_path, "rb") as f:
                             pdf_bytes = f.read()
-                        try:
-                            # 🌟 ここがポイント：sizeを1200から800に下げて軽くしました
-                            imgs = convert_from_path(pdf_path, size=(800, None))
-                            for i, img in enumerate(imgs):
-                                st.session_state.all_pages_data.append({
-                                    "id": f"{uploaded_file.name}_{i}_{os.urandom(4).hex()}", 
-                                    "filename": uploaded_file.name,
-                                    "page_num": i + 1,
-                                    "img": img,
-                                    "pdf_bytes": pdf_bytes,
-                                    "active": True,
-                                    "rotate": 0
-                                })
-                        except Exception as e:
-                            st.error(f"エラー: {e}")
+                        
+                        # 🌟 金庫に本体を保存（1回だけ！）
+                        st.session_state.file_vault[uploaded_file.name] = pdf_bytes
+                        
+                        # 🌟 一覧用の「超軽量」画像（300ピクセル）だけ作成
+                        imgs = convert_from_path(pdf_path, size=(300, None))
+                        for i, img in enumerate(imgs):
+                            st.session_state.page_list.append({
+                                "id": f"{uploaded_file.name}_{i}_{os.urandom(2).hex()}",
+                                "filename": uploaded_file.name,
+                                "page_num": i + 1,
+                                "thumb": img, # 軽い画像
+                                "active": True,
+                                "rotate": 0
+                            })
                 st.rerun()
 
 # --- 5. 並び替えと編集 ---
-if st.session_state.all_pages_data:
+if st.session_state.page_list:
     st.subheader("🤚 順番をいれかえる")
-    active_labels = [p["id"] for p in st.session_state.all_pages_data if p["active"]]
+    active_labels = [p["id"] for p in st.session_state.page_list if p["active"]]
     
     if active_labels:
         sorted_ids = sort_items(active_labels, direction="horizontal")
         if sorted_ids != active_labels:
-            id_map = {p["id"]: p for p in st.session_state.all_pages_data}
-            inactive_list = [p for p in st.session_state.all_pages_data if not p["active"]]
-            st.session_state.all_pages_data = [id_map[sid] for sid in sorted_ids] + inactive_list
+            id_map = {p["id"]: p for p in st.session_state.page_list}
+            inactive_list = [p for p in st.session_state.page_list if not p["active"]]
+            st.session_state.page_list = [id_map[sid] for sid in sorted_ids] + inactive_list
             st.rerun()
 
     st.divider()
     st.subheader("📝 ページごとの編集")
     
-    rows = [st.session_state.all_pages_data[i:i+4] for i in range(0, len(st.session_state.all_pages_data), 4)]
+    rows = [st.session_state.page_list[i:i+6] for i in range(0, len(st.session_state.page_list), 6)]
     for row_idx, row_pages in enumerate(rows):
-        cols = st.columns(4)
+        cols = st.columns(6)
         for i, page in enumerate(row_pages):
-            idx = row_idx * 4 + i
+            idx = (st.session_state.page_list.index(page))
             with cols[i]:
-                d_img = page["img"].rotate(-page["rotate"], expand=True)
+                d_img = page["thumb"].rotate(-page["rotate"], expand=True)
                 if not page["active"]: d_img = d_img.convert("L")
                 st.image(d_img, width=st.session_state.global_zoom)
                 
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     icon = "🗑️" if page["active"] else "✅"
-                    if st.button(icon, key=f"a_btn_{page['id']}"):
+                    if st.button(icon, key=f"a_{page['id']}"):
                         page["active"] = not page["active"]
                         st.rerun()
                 with b2:
-                    if st.button("🔄", key=f"r_btn_{page['id']}"):
+                    if st.button("🔄", key=f"r_{page['id']}"):
                         page["rotate"] = (page["rotate"] + 90) % 360
                         st.rerun()
                 with b3:
-                    if st.button("🔍", key=f"z_btn_{page['id']}"):
+                    if st.button("🔍", key=f"z_{page['id']}"):
                         st.session_state.active_zoom_index = idx
                         st.rerun()
-                st.caption(f"{'削除済' if not page['active'] else 'No.' + str(idx+1)}")
 
-    # --- 6. 最終合体処理 ---
+    # --- 6. 最終合体 ---
     st.divider()
-    st.subheader("🏁 仕上げ")
     custom_filename = st.text_input("💾 保存するファイルの名前", value="merged_document")
-    
     if st.button("🚀 PDFを作成して保存", type="primary", use_container_width=True):
-        active_pages = [p for p in st.session_state.all_pages_data if p["active"]]
-        if not active_pages:
-            st.warning("使うページをえらんでね。")
-        else:
+        active_pages = [p for p in st.session_state.page_list if p["active"]]
+        if active_pages:
             final_merger = PdfWriter()
             with tempfile.TemporaryDirectory() as save_dir:
                 save_dir_path = Path(save_dir)
-                for idx, page in enumerate(active_pages):
-                    pdf_stream = io.BytesIO(page["pdf_bytes"])
-                    reader = PdfReader(pdf_stream)
+                for i, page in enumerate(active_pages):
+                    pdf_bytes = st.session_state.file_vault[page["filename"]]
+                    reader = PdfReader(io.BytesIO(pdf_bytes))
                     writer = PdfWriter()
                     page_obj = reader.pages[page["page_num"] - 1]
                     page_obj.rotate(page["rotate"])
                     writer.add_page(page_obj)
                     
-                    temp_p = save_dir_path / f"temp_{idx}.pdf"
+                    temp_p = save_dir_path / f"t_{i}.pdf"
                     with open(temp_p, "wb") as f:
                         writer.write(f)
                     
-                    final_path = temp_p
                     if use_ocr:
-                        ocr_p = save_dir_path / f"ocr_{idx}.pdf"
-                        subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
-                        final_path = ocr_p
-                    final_merger.append(str(final_path))
+                        ocr_p = save_dir_path / f"o_{i}.pdf"
+                        subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(temp_p), str(ocr_p)])
+                        temp_p = ocr_p
+                    final_merger.append(str(temp_p))
                 
-                output = io.BytesIO()
-                final_merger.write(output)
+                out_io = io.BytesIO()
+                final_merger.write(out_io)
                 f_name = custom_filename if custom_filename.endswith(".pdf") else f"{custom_filename}.pdf"
-                st.success(f"🎉 「{f_name}」完成！")
-                st.download_button("📥 ダウンロード", output.getvalue(), f_name, "application/pdf")
+                st.success("🎉 完成！")
+                st.download_button("📥 ダウンロード", out_io.getvalue(), f_name)
