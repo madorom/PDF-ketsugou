@@ -11,7 +11,8 @@ from streamlit_sortables import sort_items
 # ページの基本設定
 st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
 
-st.title("🛡️ PDF編集")
+st.title("🛡️ PDFプロ・編集スタジオ（名前変更版）")
+st.write("さいごに好きな名前を付けて保存できるようになったよ！")
 
 # --- 1. 魔法のメモ帳（セッションステート）の準備 ---
 if "all_pages_data" not in st.session_state:
@@ -32,7 +33,6 @@ def zoom_edit_modal():
 
     page_info = st.session_state.all_pages_data[index]
     
-    # 操作ボタン
     col_nav1, col_edit, col_nav2, col_close = st.columns([1, 2, 1, 1])
     with col_nav1:
         if st.button("⬅️ 前へ", use_container_width=True, key="modal_prev_btn"):
@@ -61,14 +61,12 @@ def zoom_edit_modal():
             st.rerun()
 
     st.divider()
-    # 画像の表示
     display_img = page_info["img"].rotate(-page_info["rotate"], expand=True)
     if not page_info["active"]:
         display_img = display_img.convert("L")
         st.warning("⚠️ このページは削除設定中です")
     st.image(display_img, use_container_width=True)
 
-# 拡大画面を表示中なら呼び出す
 if st.session_state.active_zoom_index is not None:
     zoom_edit_modal()
 
@@ -84,7 +82,7 @@ with st.sidebar:
         st.rerun()
 
 # --- 4. ファイルの読み込み ---
-uploaded_files = st.file_uploader("ファイルを選択", type=["pdf", "docx", "xlsx", "pptx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("ファイルをえらんでね", type=["pdf", "docx", "xlsx", "pptx"], accept_multiple_files=True)
 
 if uploaded_files:
     current_files = [p["filename"] for p in st.session_state.all_pages_data]
@@ -106,7 +104,6 @@ if uploaded_files:
                         with open(pdf_path, "rb") as f:
                             pdf_bytes = f.read()
                         try:
-                            # プレビュー画像を高画質で作成
                             imgs = convert_from_path(pdf_path, size=(1200, None))
                             for i, img in enumerate(imgs):
                                 st.session_state.all_pages_data.append({
@@ -166,6 +163,11 @@ if st.session_state.all_pages_data:
 
     # --- 6. 最終合体処理 ---
     st.divider()
+    st.subheader("🏁 仕上げ")
+    
+    # 🌟【新機能】ファイル名を入力するボックス
+    custom_filename = st.text_input("💾 保存するファイルの名前を決めてね", value="merged_document")
+    
     if st.button("🚀 PDFを作成して保存", type="primary", use_container_width=True):
         active_pages = [p for p in st.session_state.all_pages_data if p["active"]]
         if not active_pages:
@@ -188,6 +190,7 @@ if st.session_state.all_pages_data:
                     
                     final_path = temp_p
                     if use_ocr:
+                        st.write(f"👁️ OCR中... {page['id']}")
                         ocr_p = save_dir_path / f"ocr_{idx}.pdf"
                         subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
                         final_path = ocr_p
@@ -195,5 +198,10 @@ if st.session_state.all_pages_data:
                 
                 output = io.BytesIO()
                 final_merger.write(output)
-                st.success("🎉 完成しました！")
-                st.download_button("📥 ダウンロード", output.getvalue(), "merged.pdf", "application/pdf")
+                
+                # 🌟 入力された名前に「.pdf」をつけてダウンロード！
+                # もし名前に .pdf が入っていても大丈夫なように工夫します
+                final_name = custom_filename if custom_filename.endswith(".pdf") else f"{custom_filename}.pdf"
+                
+                st.success(f"🎉 「{final_name}」が完成しました！")
+                st.download_button("📥 ダウンロードする", output.getvalue(), final_name, "application/pdf")
