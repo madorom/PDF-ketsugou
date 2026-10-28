@@ -1,3 +1,4 @@
+import base64
 import gc
 import math
 import shutil
@@ -8,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
+import streamlit.components.v1 as components
 from pdf2image import convert_from_path
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
@@ -84,19 +86,19 @@ def import_document(upload):
         raise
 
 
-def preview(document, page, size=240):
-    # Cache JPEGs on disk rather than retaining every page as a PIL image.
-    target = Path(document["path"]).parent / f"preview-{page['number']}-{page['rotation']}-{size}.jpg"
+def preview(document, page, size=900):
+    # Cache lossless previews on disk; render only the requested pages.
+    target = Path(document["path"]).parent / f"preview-{page['number']}-{page['rotation']}-{size}.png"
     if not target.exists():
         paths = convert_from_path(document["path"], first_page=page["number"],
-                                  last_page=page["number"], size=size, fmt="jpeg",
+                                  last_page=page["number"], size=size, fmt="png",
                                   output_folder=str(target.parent), paths_only=True,
                                   thread_count=1, timeout=45)
         try:
             with Image.open(paths[0]) as source:
                 rotated = source.rotate(-page["rotation"], expand=True)
                 try:
-                    rotated.save(target, "JPEG", quality=80)
+                    rotated.save(target, "PNG")
                 finally:
                     rotated.close()
         finally:
@@ -105,11 +107,36 @@ def preview(document, page, size=240):
     return str(target)
 
 
-def show_preview(document, page, size=240):
+def show_preview(document, page, size=900):
     try:
         st.image(preview(document, page, size), use_container_width=True)
     except Exception:
         st.caption("📄 プレビューを作成できません。結合は引き続きお試しいただけます。")
+
+
+CARDS_HTML = '<!doctype html><html lang="ja"><meta charset="utf-8">\n<style>\n*{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}\n#cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;align-items:start}\n.card{background:white;border:1px solid #dce0ea;border-radius:14px;padding:12px;cursor:grab;min-width:0}\n.card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}\n.preview{display:block;width:100%;height:250px;object-fit:contain;background:#f4f5f8;border-radius:6px;cursor:zoom-in}\n.name{font-weight:600;overflow-wrap:anywhere;margin:12px 0 6px;min-height:40px}\n.meta{color:#667085;margin-bottom:12px}.actions{display:flex;gap:6px;flex-wrap:wrap}\nbutton{background:white;border:1px solid #dce0ea;border-radius:7px;padding:8px;cursor:pointer;color:inherit}\nbutton:hover{border-color:#e44747}button:focus-visible,.card:focus-visible{outline:3px solid #e44747}\n.hint{font-size:12px;color:#667085;margin:0 0 8px}\ndialog{border:0;border-radius:12px;padding:16px;max-width:96vw;max-height:95vh}\ndialog::backdrop{background:#0009}#large{display:block;max-width:90vw;max-height:78vh;object-fit:contain}\n@media(max-width:500px){#cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.preview{height:190px}.card{padding:8px}}\n</style>\n<p class="hint">画像・カードをつかんで移動 ／ 画像をクリックして拡大 ／ 矢印ボタンでも移動できます</p>\n<div id="cards"></div><p id="status" role="status" aria-live="polite"></p>\n<dialog id="zoom"><button id="close">閉じる</button><img id="large" alt="拡大プレビュー"></dialog>\n<script>\nconst grid=document.getElementById("cards"),status=document.getElementById("status");\nlet items=[],revision=0,dragged=null,disabled=false;\nfunction send(type,data){window.parent.postMessage({isStreamlitMessage:true,type,...data},"*")}\nfunction height(){send("streamlit:setFrameHeight",{height:document.body.scrollHeight+12})}\nfunction emit(action,id,order){if(disabled)return;send("streamlit:setComponentValue",{dataType:"json",value:{action,id,order,revision,event_id:crypto.randomUUID()}})}\nfunction reorder(from,to){if(from===to)return;const next=items.slice();next.splice(to,0,next.splice(from,1)[0]);items=next;render();emit("reorder",null,items.map(x=>x.id))}\nfunction button(label,fn,title){const b=document.createElement("button");b.textContent=label;b.title=title||label;b.disabled=disabled;b.onclick=e=>{e.stopPropagation();fn()};return b}\nfunction render(){\n grid.replaceChildren();\n items.forEach((item,index)=>{\n  const card=document.createElement("article");card.className="card";card.draggable=!disabled;card.dataset.id=item.id;\n  card.tabIndex=0;card.setAttribute("aria-label",(index+1)+". "+item.name);\n  card.ondragstart=e=>{if(e.target.closest("button")){e.preventDefault();return}dragged=item.id;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",item.id);card.classList.add("dragging")};\n  card.ondragover=e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";card.classList.add("over")}};\n  card.ondragleave=()=>card.classList.remove("over");\n  card.ondrop=e=>{e.preventDefault();card.classList.remove("over");const from=items.findIndex(x=>x.id===dragged),to=items.findIndex(x=>x.id===item.id);if(from>=0&&to>=0)reorder(from,to);dragged=null};\n  card.ondragend=()=>{dragged=null;document.querySelectorAll(".card").forEach(x=>x.classList.remove("over","dragging"))};\n  if(item.image){const img=document.createElement("img");img.className="preview";img.src=item.image;img.alt=item.name+" の先頭ページ";img.draggable=false;\n   img.onclick=()=>emit("preview",item.id);img.onload=height;card.append(img);\n  }else{const p=document.createElement("p");p.className="preview";p.textContent=item.active?"プレビューを作成できません":"全ページ除外中";card.append(p)}\n  const name=document.createElement("div");name.className="name";name.textContent=(index+1)+". "+item.name;card.append(name);\n  const meta=document.createElement("div");meta.className="meta";meta.textContent=item.active+" / "+item.total+" ページ";card.append(meta);\n  const actions=document.createElement("div");actions.className="actions";\n  actions.append(button("ページ編集",()=>emit("edit",item.id)),button("削除",()=>emit("remove",item.id)));\n  const prev=button("←",()=>reorder(index,index-1),"前へ移動");prev.disabled=disabled||index===0;\n  const next=button("→",()=>reorder(index,index+1),"後ろへ移動");next.disabled=disabled||index===items.length-1;\n  actions.append(prev,next);card.append(actions);grid.append(card);\n });\n height();\n}\nwindow.addEventListener("message",e=>{if(e.source!==window.parent||e.data.type!=="streamlit:render")return;\n items=e.data.args.items;revision=e.data.args.revision;disabled=!!e.data.disabled;render();\n});\nnew ResizeObserver(height).observe(grid);\nsend("streamlit:componentReady",{apiVersion:1});height();\n</script></html>\n'
+
+
+@st.cache_resource
+def cards_component():
+    folder = Path(tempfile.mkdtemp(prefix="pdf-cards-ui-"))
+    (folder / "index.html").write_text(CARDS_HTML, encoding="utf-8")
+    return components.declare_component("pdf_document_cards", path=str(folder))
+
+
+@st.dialog("拡大プレビュー", width="large")
+def enlarged_preview(document_id):
+    document = next((d for d in st.session_state.documents if d["id"] == document_id), None)
+    if document:
+        pages = [p for p in document["pages"] if p["active"]]
+        st.write(document["name"])
+        if pages:
+            show_preview(document, pages[0], size=1800)
+        else:
+            st.info("全ページ除外中")
+    if st.button("閉じる", key="close-preview"):
+        st.session_state.preview_id = None
+        st.rerun()
 
 
 def merge_documents(documents, destination):
@@ -159,7 +186,7 @@ def edit_document(document_id):
         for column, page in zip(columns, document["pages"][offset:offset + 3]):
             with column:
                 with st.container(border=True):
-                    show_preview(document, page)
+                    show_preview(document, page, size=1200)
                     st.caption(f"P.{page['number']} · {page['rotation']}°" +
                                ("" if page["active"] else " · 除外中"))
                     left, right = st.columns(2)
@@ -214,35 +241,44 @@ if not documents:
 else:
     total_pages = sum(sum(p["active"] for p in d["pages"]) for d in documents)
     st.subheader(f"{len(documents)}ファイル · {total_pages}ページ")
-    st.caption("ファイル名をドラッグして結合順を変更。カードの「ページ編集」で削除・回転ができます。")
-    # Stable ordinals disambiguate duplicate filenames without exposing random IDs.
-    labels = [f"{d['name']} 〈{i + 1}〉" for i, d in enumerate(documents)]
-    order = sort_items(labels, direction="horizontal",
-                       key=f"documents-{st.session_state.order_epoch}")
-    if order != labels and sorted(order) == sorted(labels):
-        by_label = dict(zip(labels, documents))
-        st.session_state.documents = [by_label[label] for label in order]
-        invalidate()
-        st.rerun()
-    for offset in range(0, len(documents), 4):
-        for index, (column, document) in enumerate(zip(st.columns(4), documents[offset:offset + 4]), offset):
-            with column:
-                with st.container(border=True):
-                    pages = [p for p in document["pages"] if p["active"]]
-                    if pages:
-                        show_preview(document, pages[0])
-                    else:
-                        st.info("全ページ除外中")
-                    st.write(f"**{index + 1}. {document['name']}**")
-                    st.caption(f"{len(pages)} / {len(document['pages'])} ページ")
-                    if st.button("ページ編集", key=f"edit-{document['id']}", use_container_width=True):
-                        st.session_state.editor_id = document["id"]
-                        st.rerun()
-                    if st.button("ファイルを削除", key=f"remove-{document['id']}", use_container_width=True):
-                        st.session_state.documents = [d for d in documents if d["id"] != document["id"]]
-                        shutil.rmtree(Path(document["path"]).parent, ignore_errors=True)
-                        invalidate()
-                        st.rerun()
+    st.caption("画像付きカードをドラッグして結合順を変更できます。画像をクリックすると拡大します。")
+    card_items = []
+    for document in documents:
+        active = [p for p in document["pages"] if p["active"]]
+        image = None
+        if active:
+            try:
+                image = "data:image/png;base64," + base64.b64encode(
+                    Path(preview(document, active[0])).read_bytes()).decode("ascii")
+            except Exception:
+                pass
+        card_items.append({"id": document["id"], "name": document["name"],
+                           "active": len(active), "total": len(document["pages"]), "image": image})
+    event = cards_component()(items=card_items, revision=st.session_state.order_epoch,
+                              key=f"file-cards-{st.session_state.upload_epoch}", default=None)
+    if (isinstance(event, dict) and event.get("event_id") != st.session_state.get("last_card_event")
+            and event.get("revision") == st.session_state.order_epoch):
+        st.session_state.last_card_event = event.get("event_id")
+        by_id = {d["id"]: d for d in documents}
+        action, document_id = event.get("action"), event.get("id")
+        if action == "reorder":
+            order = event.get("order")
+            if (isinstance(order, list) and len(order) == len(by_id)
+                    and all(isinstance(i, str) for i in order) and set(order) == set(by_id)
+                    and order != [d["id"] for d in documents]):
+                st.session_state.documents = [by_id[i] for i in order]
+                invalidate()
+                st.rerun()
+        elif document_id in by_id:
+            if action == "remove":
+                st.session_state.documents = [d for d in documents if d["id"] != document_id]
+                shutil.rmtree(Path(by_id[document_id]["path"]).parent, ignore_errors=True)
+                invalidate()
+                st.rerun()
+            elif action in ("edit", "preview"):
+                st.session_state.editor_id = document_id if action == "edit" else None
+                st.session_state.preview_id = document_id if action == "preview" else None
+                st.rerun()
 
     st.divider()
     with st.expander("詳細設定"):
@@ -290,3 +326,7 @@ st.caption("ファイルはこのアプリのサーバーで処理されます�
 
 if st.session_state.get("editor_id"):
     edit_document(st.session_state.editor_id)
+
+
+if st.session_state.get("preview_id"):
+    enlarged_preview(st.session_state.preview_id)
