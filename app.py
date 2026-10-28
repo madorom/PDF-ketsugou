@@ -17,7 +17,7 @@ st.set_page_config(page_title="PDFManager", page_icon="📄", layout="wide")
 st.markdown("""
 <style>
 .stApp {background: #f7f8fc;}
-.block-container {max-width: 1300px; padding-top: 1.5rem;}
+.block-container {max-width: 1300px; padding-top: 4rem;}
 h1 {letter-spacing: -.04em;}
 div[data-testid="stFileUploader"] {display: none;}
 div[data-testid="stElementContainer"]:has(div[data-testid="stFileUploader"]) {display: none;}
