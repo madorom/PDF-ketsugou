@@ -123,24 +123,39 @@ PAGE_HTML = r'''
 <style>
 *{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}
 .toolbar{display:flex;justify-content:flex-end;margin:0 0 12px}
-#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;align-items:start;min-height:360px}
-.card{background:#fff;border:1px solid #dce0ea;border-radius:12px;padding:10px;cursor:grab;min-width:0}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,198px);gap:10px;align-items:start;min-height:360px}
+.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:50px 8px 8px;cursor:grab;min-width:0;width:198px;height:244px;box-shadow:0 2px 8px #1a203008}
+.card:hover,.card:focus-within{border-color:#9ca3af}
 .card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}
 .card.excluded .preview{opacity:.4;filter:grayscale(1)}
-.preview{display:block;width:100%;height:250px;object-fit:contain;background:#f4f5f8;border-radius:6px;cursor:zoom-in}
-.name{font-size:12px;overflow-wrap:anywhere;margin:8px 0;color:#667085}
-.meta{font-weight:600;margin:8px 0}.actions{display:flex;gap:5px;flex-wrap:wrap}
+.preview{display:block;width:100%;height:140px;object-fit:contain;cursor:zoom-in}
+.name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 0;color:#4b5563}
+.meta{font-size:11px;color:#667085;margin:8px 0 0;white-space:nowrap}
+.actions{position:absolute;top:9px;right:8px;display:flex;gap:4px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s}
+.card:hover .actions,.card:focus-within .actions{opacity:1;visibility:visible;pointer-events:auto}
+.actions button{width:26px;height:26px;display:grid;place-items:center;padding:4px;border-radius:50%;background:#f0f1f5;border-color:#e5e7eb}
+.actions button:hover{background:#e5e7eb}.actions svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+#filename-tip{position:fixed;z-index:1000;display:none;max-width:min(360px,calc(100vw - 16px));padding:8px 10px;border-radius:6px;background:#42454d;color:white;font-size:12px;line-height:1.5;overflow-wrap:anywhere;pointer-events:none;box-shadow:0 3px 10px #0002}
 button{font:inherit;background:white;border:1px solid #dce0ea;border-radius:7px;padding:7px;cursor:pointer;color:inherit}
 button:hover{border-color:#e44747}button:focus-visible,.card:focus-visible{outline:3px solid #e44747}
 #empty{display:none;min-height:360px;place-items:center;color:#667085;border:2px dashed #dce0ea;border-radius:16px;cursor:pointer}
 #status{color:#b42318;font-size:13px}
-@media(max-width:500px){#cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.preview{height:190px}.card{padding:8px}}
+@media(max-width:440px){#cards{grid-template-columns:repeat(2,minmax(0,198px));gap:8px}.card{width:100%}}
+@media(hover:none),(pointer:coarse){.actions{opacity:1;visibility:visible;pointer-events:auto}}
 </style>
 <div class="toolbar"><button id="add">＋ ファイル追加</button></div>
 <div id="empty" role="button" tabindex="0">ファイルをドロップ</div>
-<div id="cards"></div><div id="status" role="status" aria-live="polite"></div>
+<div id="cards"></div><div id="status" role="status" aria-live="polite"></div><div id="filename-tip" role="tooltip"></div>
 <script>
 const grid=document.getElementById("cards"),status=document.getElementById("status"),empty=document.getElementById("empty");
+const filenameTip=document.getElementById("filename-tip");
+function hideFilename(){filenameTip.style.display="none"}
+function showFilename(card,item){
+ filenameTip.textContent=item.name;filenameTip.style.display="block";
+ const box=card.getBoundingClientRect(),tip=filenameTip.getBoundingClientRect();
+ filenameTip.style.left=Math.max(8,Math.min(box.left,window.innerWidth-tip.width-8))+"px";
+ filenameTip.style.top=Math.max(4,box.top-tip.height-8)+"px";
+}
 let items=[],revision=0,dragged=null,disabled=false;
 function send(type,data){window.parent.postMessage({isStreamlitMessage:true,type,...data},"*")}
 let lastHeight=0;
@@ -148,17 +163,26 @@ function height(){const value=document.body.scrollHeight+12;if(value!==lastHeigh
 function emit(action,id,order){if(disabled)return;send("streamlit:setComponentValue",{dataType:"json",value:{action,id,order,revision,event_id:crypto.randomUUID()}})}
 function reorder(from,to){if(from===to||from<0||to<0||to>=items.length)return;const next=items.slice();next.splice(to,0,next.splice(from,1)[0]);items=next;render();emit("reorder",null,items.map(x=>x.id))}
 function button(label,fn,title){const b=document.createElement("button");b.textContent=label;b.title=title||label;b.disabled=disabled;b.onclick=e=>{e.stopPropagation();fn()};return b}
+function iconButton(kind,fn,label){
+ const b=button("",fn,label);b.setAttribute("aria-label",label);
+ const paths={zoom:'<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M10 7v6M7 10h6"/>',rotate:'<path d="M19 7V2l-4 4a8 8 0 1 0 4 6M19 2h-5"/>',remove:'<path d="m6 6 12 12M18 6 6 18"/>',restore:'<path d="m5 12 4 4L19 6"/>'};
+ b.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true">'+paths[kind]+'</svg>';return b;
+}
 function uploadInput(){return window.parent.document.querySelector('[data-testid="stFileUploader"] input[type="file"]')}
 function chooseFiles(){try{const input=uploadInput();if(!input)throw Error("upload input missing");input.click()}catch(e){status.textContent="追加ボタンを読み込めません。画面を再読み込みしてください。";height()}}
 document.getElementById("add").onclick=chooseFiles;empty.onclick=chooseFiles;
 empty.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();chooseFiles()}};
 function render(){
+ hideFilename();
  grid.replaceChildren();grid.style.display=items.length?"grid":"none";empty.style.display=items.length?"none":"grid";
  items.forEach((item,index)=>{
   const card=document.createElement("article");card.className="card"+(item.active?"":" excluded");card.draggable=!disabled;card.dataset.id=item.id;
   card.tabIndex=0;card.setAttribute("aria-label",(index+1)+". "+item.name+" P."+item.number);
+  card.setAttribute("aria-describedby","filename-tip");
+  card.onmouseenter=()=>showFilename(card,item);card.onmouseleave=hideFilename;
+  card.onfocus=()=>showFilename(card,item);card.onblur=hideFilename;
   card.onkeydown=e=>{if(e.target!==card||!e.altKey)return;if(e.key==="ArrowLeft"){e.preventDefault();reorder(index,index-1)}if(e.key==="ArrowRight"){e.preventDefault();reorder(index,index+1)}};
-  card.ondragstart=e=>{if(e.target.closest("button")){e.preventDefault();return}dragged=item.id;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",item.id);card.classList.add("dragging")};
+  card.ondragstart=e=>{if(e.target.closest("button")){e.preventDefault();return}hideFilename();dragged=item.id;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",item.id);card.classList.add("dragging")};
   card.ondragover=e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";card.classList.add("over")}};
   card.ondragleave=()=>card.classList.remove("over");
   card.ondrop=e=>{if(Array.from(e.dataTransfer.types||[]).includes("Files"))return;e.preventDefault();card.classList.remove("over");const from=items.findIndex(x=>x.id===dragged),to=items.findIndex(x=>x.id===item.id);if(from>=0&&to>=0)reorder(from,to);dragged=null};
@@ -166,13 +190,11 @@ function render(){
   const img=document.createElement(item.image?"img":"div");img.className="preview";img.draggable=false;
   if(item.image){img.src=item.image;img.alt=item.name+" P."+item.number;img.onload=height;img.onclick=()=>emit("preview",item.id)}
   else{img.textContent="プレビューなし"}card.append(img);
-  const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · P."+item.number+(item.active?"":" · 除外中");card.append(meta);
+  const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · 元 P."+item.number+" / "+item.total+(item.active?"":" · 除外中");card.append(meta);
   const name=document.createElement("div");name.className="name";name.textContent=item.name;card.append(name);
   const actions=document.createElement("div");actions.className="actions";
-  actions.append(button("↻",()=>emit("rotate",item.id),"90度回転"),button(item.active?"削除":"戻す",()=>emit("toggle",item.id)));
-  const prev=button("←",()=>reorder(index,index-1),"前へ移動");prev.disabled=disabled||index===0;
-  const next=button("→",()=>reorder(index,index+1),"後ろへ移動");next.disabled=disabled||index===items.length-1;
-  actions.append(prev,next);card.append(actions);grid.append(card);
+  actions.append(iconButton("zoom",()=>emit("preview",item.id),"拡大"),iconButton("rotate",()=>emit("rotate",item.id),"90度回転"),iconButton(item.active?"remove":"restore",()=>emit("toggle",item.id),item.active?"削除":"戻す"));
+  card.append(actions);grid.append(card);
  });height();
 }
 function installFileDrop(){
@@ -212,7 +234,7 @@ installFileDrop();send("streamlit:componentReady",{apiVersion:1});height();
 def page_canvas():
     folder = Path(tempfile.mkdtemp(prefix="pdf-page-canvas-"))
     (folder / "index.html").write_text(PAGE_HTML, encoding="utf-8")
-    return components.declare_component("pdf_page_canvas_v3", path=str(folder))
+    return components.declare_component("pdf_page_canvas_v4", path=str(folder))
 
 
 def valid_order(order, pages):
@@ -306,7 +328,7 @@ for page in pages:
             Path(preview(document, page, size=900)).read_bytes()).decode("ascii")
     except Exception:
         pass
-    card_items.append({"id": page["id"], "name": document["name"], "number": page["number"],
+    card_items.append({"id": page["id"], "name": document["name"], "number": page["number"], "total": len(document["pages"]),
                        "active": page["active"], "image": image})
 
 event = page_canvas()(items=card_items, revision=st.session_state.order_epoch,
