@@ -1,6 +1,5 @@
 import base64
 import gc
-import math
 import shutil
 import subprocess
 import tempfile
@@ -13,21 +12,19 @@ import streamlit.components.v1 as components
 from pdf2image import convert_from_path
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
-from streamlit_sortables import sort_items
 
-st.set_page_config(page_title="PDF結合", page_icon="📄", layout="wide")
+st.set_page_config(page_title="PDFManager", page_icon="📄", layout="wide")
 st.markdown("""
 <style>
 .stApp {background: #f7f8fc;}
-.block-container {max-width: 1150px; padding-top: 2.5rem;}
+.block-container {max-width: 1300px; padding-top: 1.5rem;}
 h1 {letter-spacing: -.04em;}
-div[data-testid="stVerticalBlockBorderWrapper"] {background: white; border-radius: 14px;}
-div[data-testid="stFileUploader"] {background: white; border-radius: 14px; padding: 12px;}
+div[data-testid="stFileUploader"] {display: none;}
+div[data-testid="stElementContainer"]:has(div[data-testid="stFileUploader"]) {display: none;}
 div.stButton > button[kind="primary"] {background: #e44747; border-color: #e44747;}
 </style>
 """, unsafe_allow_html=True)
 
-# TemporaryDirectory cleans up when the session releases this object.
 if "pdf_workspace_v2" not in st.session_state:
     st.session_state.pdf_workspace_v2 = tempfile.TemporaryDirectory(prefix="pdf-merge-")
     st.session_state.documents = []
@@ -38,6 +35,14 @@ if "pdf_workspace_v2" not in st.session_state:
     st.session_state.result_signature = None
 
 root = Path(st.session_state.pdf_workspace_v2.name)
+
+# Preserve uploaded documents when upgrading an existing session.
+if "manager_pages" not in st.session_state:
+    st.session_state.manager_pages = []
+    for document in st.session_state.documents:
+        for page in document["pages"]:
+            st.session_state.manager_pages.append(dict(page, document_id=document["id"],
+                                                       id=f"{document['id']}:{page['number']}"))
 
 
 def invalidate():
@@ -113,103 +118,151 @@ def show_preview(document, page, size=900):
     except Exception:
         st.caption("📄 プレビューを作成できません。結合は引き続きお試しいただけます。")
 
+PAGE_HTML = r'''
+<!doctype html><html lang="ja"><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}
+.toolbar{display:flex;justify-content:flex-end;margin:0 0 12px}
+#cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;align-items:start;min-height:360px}
+.card{background:#fff;border:1px solid #dce0ea;border-radius:12px;padding:10px;cursor:grab;min-width:0}
+.card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}
+.card.excluded .preview{opacity:.4;filter:grayscale(1)}
+.preview{display:block;width:100%;height:250px;object-fit:contain;background:#f4f5f8;border-radius:6px;cursor:zoom-in}
+.name{font-size:12px;overflow-wrap:anywhere;margin:8px 0;color:#667085}
+.meta{font-weight:600;margin:8px 0}.actions{display:flex;gap:5px;flex-wrap:wrap}
+button{font:inherit;background:white;border:1px solid #dce0ea;border-radius:7px;padding:7px;cursor:pointer;color:inherit}
+button:hover{border-color:#e44747}button:focus-visible,.card:focus-visible{outline:3px solid #e44747}
+#empty{display:none;min-height:360px;place-items:center;color:#667085;border:2px dashed #dce0ea;border-radius:16px;cursor:pointer}
+#status{color:#b42318;font-size:13px}
+@media(max-width:500px){#cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.preview{height:190px}.card{padding:8px}}
+</style>
+<div class="toolbar"><button id="add">＋ ファイル追加</button></div>
+<div id="empty" role="button" tabindex="0">ファイルをドロップ</div>
+<div id="cards"></div><div id="status" role="status" aria-live="polite"></div>
+<script>
+const grid=document.getElementById("cards"),status=document.getElementById("status"),empty=document.getElementById("empty");
+let items=[],revision=0,dragged=null,disabled=false;
+function send(type,data){window.parent.postMessage({isStreamlitMessage:true,type,...data},"*")}
+let lastHeight=0;
+function height(){const value=document.body.scrollHeight+12;if(value!==lastHeight){lastHeight=value;send("streamlit:setFrameHeight",{height:value})}}
+function emit(action,id,order){if(disabled)return;send("streamlit:setComponentValue",{dataType:"json",value:{action,id,order,revision,event_id:crypto.randomUUID()}})}
+function reorder(from,to){if(from===to||from<0||to<0||to>=items.length)return;const next=items.slice();next.splice(to,0,next.splice(from,1)[0]);items=next;render();emit("reorder",null,items.map(x=>x.id))}
+function button(label,fn,title){const b=document.createElement("button");b.textContent=label;b.title=title||label;b.disabled=disabled;b.onclick=e=>{e.stopPropagation();fn()};return b}
+function uploadInput(){return window.parent.document.querySelector('[data-testid="stFileUploader"] input[type="file"]')}
+function chooseFiles(){try{const input=uploadInput();if(!input)throw Error("upload input missing");input.click()}catch(e){status.textContent="追加ボタンを読み込めません。画面を再読み込みしてください。";height()}}
+document.getElementById("add").onclick=chooseFiles;empty.onclick=chooseFiles;
+empty.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();chooseFiles()}};
+function render(){
+ grid.replaceChildren();grid.style.display=items.length?"grid":"none";empty.style.display=items.length?"none":"grid";
+ items.forEach((item,index)=>{
+  const card=document.createElement("article");card.className="card"+(item.active?"":" excluded");card.draggable=!disabled;card.dataset.id=item.id;
+  card.tabIndex=0;card.setAttribute("aria-label",(index+1)+". "+item.name+" P."+item.number);
+  card.onkeydown=e=>{if(e.target!==card||!e.altKey)return;if(e.key==="ArrowLeft"){e.preventDefault();reorder(index,index-1)}if(e.key==="ArrowRight"){e.preventDefault();reorder(index,index+1)}};
+  card.ondragstart=e=>{if(e.target.closest("button")){e.preventDefault();return}dragged=item.id;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",item.id);card.classList.add("dragging")};
+  card.ondragover=e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";card.classList.add("over")}};
+  card.ondragleave=()=>card.classList.remove("over");
+  card.ondrop=e=>{if(Array.from(e.dataTransfer.types||[]).includes("Files"))return;e.preventDefault();card.classList.remove("over");const from=items.findIndex(x=>x.id===dragged),to=items.findIndex(x=>x.id===item.id);if(from>=0&&to>=0)reorder(from,to);dragged=null};
+  card.ondragend=()=>{dragged=null;document.querySelectorAll(".card").forEach(x=>x.classList.remove("over","dragging"))};
+  const img=document.createElement(item.image?"img":"div");img.className="preview";img.draggable=false;
+  if(item.image){img.src=item.image;img.alt=item.name+" P."+item.number;img.onload=height;img.onclick=()=>emit("preview",item.id)}
+  else{img.textContent="プレビューなし"}card.append(img);
+  const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · P."+item.number+(item.active?"":" · 除外中");card.append(meta);
+  const name=document.createElement("div");name.className="name";name.textContent=item.name;card.append(name);
+  const actions=document.createElement("div");actions.className="actions";
+  actions.append(button("↻",()=>emit("rotate",item.id),"90度回転"),button(item.active?"削除":"戻す",()=>emit("toggle",item.id)));
+  const prev=button("←",()=>reorder(index,index-1),"前へ移動");prev.disabled=disabled||index===0;
+  const next=button("→",()=>reorder(index,index+1),"後ろへ移動");next.disabled=disabled||index===items.length-1;
+  actions.append(prev,next);card.append(actions);grid.append(card);
+ });height();
+}
+function installFileDrop(){
+ try{
+  const host=window.parent,hostDoc=host.document;
+  if(host.__pdfManagerDropCleanup)host.__pdfManagerDropCleanup();
+  const overlay=hostDoc.createElement("div");overlay.textContent="ファイルを追加";
+  overlay.style.cssText="display:none;position:fixed;inset:10px;z-index:999999;pointer-events:none;border:3px dashed #e44747;border-radius:18px;background:#fffC;align-items:center;justify-content:center;color:#e44747;font:600 24px system-ui";
+  hostDoc.body.append(overlay);
+  let timer;const targets=[document,hostDoc];try{if(window.top.document!==hostDoc)targets.push(window.top.document)}catch(e){}
+  const isFiles=e=>Array.from(e.dataTransfer?.types||[]).includes("Files");
+  const over=e=>{if(!isFiles(e))return;e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect="copy";overlay.style.display="flex";clearTimeout(timer);timer=setTimeout(()=>overlay.style.display="none",250)};
+  const drop=e=>{
+   if(!isFiles(e))return;e.preventDefault();e.stopPropagation();clearTimeout(timer);overlay.style.display="none";
+   const files=Array.from(e.dataTransfer.files||[]);if(!files.length)return;
+   const input=uploadInput();if(!input){status.textContent="追加欄を読み込めません。再読み込みしてください。";height();return}
+   // Preserve Streamlit's native upload endpoint, limits and progress handling.
+   const transfer=new host.DataTransfer();for(const file of files)transfer.items.add(file);
+   input.files=transfer.files;input.dispatchEvent(new host.Event("change",{bubbles:true}));
+  };
+  for(const target of targets){target.addEventListener("dragover",over,true);target.addEventListener("drop",drop,true)}
+  const cleanup=()=>{clearTimeout(timer);for(const target of targets){target.removeEventListener("dragover",over,true);target.removeEventListener("drop",drop,true)}overlay.remove()};
+  host.__pdfManagerDropCleanup=cleanup;window.addEventListener("pagehide",cleanup,{once:true});
+ }catch(e){status.textContent="全画面ドロップを初期化できませんでした。再読み込みしてください。";height()}
+}
+window.addEventListener("message",e=>{if(e.source!==window.parent||e.data.type!=="streamlit:render")return;
+ items=e.data.args.items;revision=e.data.args.revision;disabled=!!e.data.disabled;render();
+});
+new ResizeObserver(height).observe(grid);
+installFileDrop();send("streamlit:componentReady",{apiVersion:1});height();
+</script></html>
 
-CARDS_HTML = '<!doctype html><html lang="ja"><meta charset="utf-8">\n<style>\n*{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}\n#cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;align-items:start}\n.card{background:white;border:1px solid #dce0ea;border-radius:14px;padding:12px;cursor:grab;min-width:0}\n.card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}\n.preview{display:block;width:100%;height:250px;object-fit:contain;background:#f4f5f8;border-radius:6px;cursor:zoom-in}\n.name{font-weight:600;overflow-wrap:anywhere;margin:12px 0 6px;min-height:40px}\n.meta{color:#667085;margin-bottom:12px}.actions{display:flex;gap:6px;flex-wrap:wrap}\nbutton{background:white;border:1px solid #dce0ea;border-radius:7px;padding:8px;cursor:pointer;color:inherit}\nbutton:hover{border-color:#e44747}button:focus-visible,.card:focus-visible{outline:3px solid #e44747}\n.hint{font-size:12px;color:#667085;margin:0 0 8px}\ndialog{border:0;border-radius:12px;padding:16px;max-width:96vw;max-height:95vh}\ndialog::backdrop{background:#0009}#large{display:block;max-width:90vw;max-height:78vh;object-fit:contain}\n@media(max-width:500px){#cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.preview{height:190px}.card{padding:8px}}\n</style>\n<p class="hint">画像・カードをつかんで移動 ／ 画像をクリックして拡大 ／ 矢印ボタンでも移動できます</p>\n<div id="cards"></div><p id="status" role="status" aria-live="polite"></p>\n<dialog id="zoom"><button id="close">閉じる</button><img id="large" alt="拡大プレビュー"></dialog>\n<script>\nconst grid=document.getElementById("cards"),status=document.getElementById("status");\nlet items=[],revision=0,dragged=null,disabled=false;\nfunction send(type,data){window.parent.postMessage({isStreamlitMessage:true,type,...data},"*")}\nfunction height(){send("streamlit:setFrameHeight",{height:document.body.scrollHeight+12})}\nfunction emit(action,id,order){if(disabled)return;send("streamlit:setComponentValue",{dataType:"json",value:{action,id,order,revision,event_id:crypto.randomUUID()}})}\nfunction reorder(from,to){if(from===to)return;const next=items.slice();next.splice(to,0,next.splice(from,1)[0]);items=next;render();emit("reorder",null,items.map(x=>x.id))}\nfunction button(label,fn,title){const b=document.createElement("button");b.textContent=label;b.title=title||label;b.disabled=disabled;b.onclick=e=>{e.stopPropagation();fn()};return b}\nfunction render(){\n grid.replaceChildren();\n items.forEach((item,index)=>{\n  const card=document.createElement("article");card.className="card";card.draggable=!disabled;card.dataset.id=item.id;\n  card.tabIndex=0;card.setAttribute("aria-label",(index+1)+". "+item.name);\n  card.ondragstart=e=>{if(e.target.closest("button")){e.preventDefault();return}dragged=item.id;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",item.id);card.classList.add("dragging")};\n  card.ondragover=e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";card.classList.add("over")}};\n  card.ondragleave=()=>card.classList.remove("over");\n  card.ondrop=e=>{e.preventDefault();card.classList.remove("over");const from=items.findIndex(x=>x.id===dragged),to=items.findIndex(x=>x.id===item.id);if(from>=0&&to>=0)reorder(from,to);dragged=null};\n  card.ondragend=()=>{dragged=null;document.querySelectorAll(".card").forEach(x=>x.classList.remove("over","dragging"))};\n  if(item.image){const img=document.createElement("img");img.className="preview";img.src=item.image;img.alt=item.name+" の先頭ページ";img.draggable=false;\n   img.onclick=()=>emit("preview",item.id);img.onload=height;card.append(img);\n  }else{const p=document.createElement("p");p.className="preview";p.textContent=item.active?"プレビューを作成できません":"全ページ除外中";card.append(p)}\n  const name=document.createElement("div");name.className="name";name.textContent=(index+1)+". "+item.name;card.append(name);\n  const meta=document.createElement("div");meta.className="meta";meta.textContent=item.active+" / "+item.total+" ページ";card.append(meta);\n  const actions=document.createElement("div");actions.className="actions";\n  actions.append(button("ページ編集",()=>emit("edit",item.id)),button("削除",()=>emit("remove",item.id)));\n  const prev=button("←",()=>reorder(index,index-1),"前へ移動");prev.disabled=disabled||index===0;\n  const next=button("→",()=>reorder(index,index+1),"後ろへ移動");next.disabled=disabled||index===items.length-1;\n  actions.append(prev,next);card.append(actions);grid.append(card);\n });\n height();\n}\nwindow.addEventListener("message",e=>{if(e.source!==window.parent||e.data.type!=="streamlit:render")return;\n items=e.data.args.items;revision=e.data.args.revision;disabled=!!e.data.disabled;render();\n});\nnew ResizeObserver(height).observe(grid);\nsend("streamlit:componentReady",{apiVersion:1});height();\n</script></html>\n'
+'''
 
 
 @st.cache_resource
-def cards_component():
-    folder = Path(tempfile.mkdtemp(prefix="pdf-cards-ui-"))
-    (folder / "index.html").write_text(CARDS_HTML, encoding="utf-8")
-    return components.declare_component("pdf_document_cards", path=str(folder))
+def page_canvas():
+    folder = Path(tempfile.mkdtemp(prefix="pdf-page-canvas-"))
+    (folder / "index.html").write_text(PAGE_HTML, encoding="utf-8")
+    return components.declare_component("pdf_page_canvas_v3", path=str(folder))
 
 
-@st.dialog("拡大プレビュー", width="large")
-def enlarged_preview(document_id):
-    document = next((d for d in st.session_state.documents if d["id"] == document_id), None)
-    if document:
-        pages = [p for p in document["pages"] if p["active"]]
-        st.write(document["name"])
-        if pages:
-            show_preview(document, pages[0], size=1800)
-        else:
-            st.info("全ページ除外中")
-    if st.button("閉じる", key="close-preview"):
-        st.session_state.preview_id = None
-        st.rerun()
+def valid_order(order, pages):
+    expected = {p["id"] for p in pages}
+    return (isinstance(order, list) and len(order) == len(pages)
+            and all(isinstance(item, str) for item in order) and set(order) == expected)
 
 
-def merge_documents(documents, destination):
-    # One reader per document; keep its stream open until the writer finishes.
+def merge_pages(documents, pages, destination):
+    by_document = {d["id"]: d for d in documents}
     writer = PdfWriter()
     try:
         with ExitStack() as stack:
-            for document in documents:
-                stream = stack.enter_context(open(document["path"], "rb"))
-                reader = PdfReader(stream)
-                if reader.is_encrypted:
-                    reader.decrypt("")
-                for page in document["pages"]:
-                    if page["active"]:
-                        original = reader.pages[page["number"] - 1]
-                        added = writer.add_page(original)
-                        if page["rotation"]:
-                            added.rotate(page["rotation"])
+            readers = {}
+            for page in pages:
+                if not page["active"]:
+                    continue
+                document_id = page["document_id"]
+                if document_id not in readers:
+                    stream = stack.enter_context(open(by_document[document_id]["path"], "rb"))
+                    reader = PdfReader(stream)
+                    if reader.is_encrypted:
+                        reader.decrypt("")
+                    readers[document_id] = reader
+                # Each page is cloned by the writer; source pages stay untouched.
+                added = writer.add_page(readers[document_id].pages[page["number"] - 1])
+                if page["rotation"]:
+                    added.rotate(page["rotation"])
             with open(destination, "wb") as output:
                 writer.write(output)
     finally:
         writer.close()
 
 
-@st.dialog("ページを編集", width="large")
-def edit_document(document_id):
-    document = next((d for d in st.session_state.documents if d["id"] == document_id), None)
-    if document is None:
-        return
-    st.write(document["name"])
-    st.caption("ページをドラッグして並べ替えられます。除外したページはもう一度押すと戻せます。")
-    labels = [f"P.{p['number']}" for p in document["pages"]]
-    ordered = sort_items(labels, direction="horizontal",
-                         key=f"pages-{document_id}-{st.session_state.order_epoch}")
-    if ordered != labels and sorted(ordered) == sorted(labels):
-        by_label = dict(zip(labels, document["pages"]))
-        document["pages"] = [by_label[label] for label in ordered]
-        invalidate()
-        st.rerun()
-    total = len(document["pages"])
-    batch = int(st.number_input("表示範囲（1画面12ページ）", min_value=1,
-                               max_value=max(1, math.ceil(total / 12)), value=1,
-                               key=f"batch-{document_id}"))
-    start = (batch - 1) * 12
-    for offset in range(start, min(start + 12, total), 3):
-        columns = st.columns(3)
-        for column, page in zip(columns, document["pages"][offset:offset + 3]):
-            with column:
-                with st.container(border=True):
-                    show_preview(document, page, size=1200)
-                    st.caption(f"P.{page['number']} · {page['rotation']}°" +
-                               ("" if page["active"] else " · 除外中"))
-                    left, right = st.columns(2)
-                    if left.button("除外" if page["active"] else "戻す",
-                                   key=f"toggle-{document_id}-{page['number']}"):
-                        page["active"] = not page["active"]
-                        invalidate()
-                        st.rerun()
-                    if right.button("↻ 回転", key=f"rotate-{document_id}-{page['number']}"):
-                        page["rotation"] = (page["rotation"] + 90) % 360
-                        invalidate()
-                        st.rerun()
-    if st.button("編集を完了", type="primary", use_container_width=True):
-        st.session_state.editor_id = None
+@st.dialog("プレビュー", width="large")
+def enlarged_preview(page_id):
+    page = next((p for p in st.session_state.manager_pages if p["id"] == page_id), None)
+    if page:
+        document = next(d for d in st.session_state.documents if d["id"] == page["document_id"])
+        st.caption(f"{document['name']} · P.{page['number']}")
+        show_preview(document, page, size=1800)
+    if st.button("閉じる", key="close-page-preview"):
+        st.session_state.manager_preview_id = None
         st.rerun()
 
 
-st.title("PDFを結合")
-st.write("ファイルを追加して、順番を変えて、ひとつのPDFに。")
-top_left, top_right = st.columns([4, 1])
-with top_left:
-    st.caption("① ファイルを追加　 →　 ② 順番を調整　 →　 ③ 結合して保存")
-with top_right:
+left, right = st.columns([5, 1])
+with left:
+    st.title("PDFManager")
+with right:
     if st.button("すべてクリア", use_container_width=True):
         st.session_state.pdf_workspace_v2.cleanup()
         for key in list(st.session_state):
@@ -217,92 +270,95 @@ with top_right:
         gc.collect()
         st.rerun()
 
-uploads = st.file_uploader("PDF・Word・Excel・PowerPointを追加",
-                          type=["pdf", "docx", "xlsx", "xlsm", "pptx"],
-                          accept_multiple_files=True,
-                          key=f"uploads-{st.session_state.upload_epoch}",
-                          help="Officeファイルは自動でPDFに変換します。マクロは実行しません。")
+# Hidden native uploader is triggered by the canvas's full-window drop handler.
+# It keeps upload-size validation and Streamlit's streaming upload protocol.
+uploads = st.file_uploader("ファイル追加", type=["pdf", "docx", "xlsx", "xlsm", "pptx"],
+                          accept_multiple_files=True, label_visibility="collapsed",
+                          key=f"uploads-{st.session_state.upload_epoch}")
 for upload in uploads or []:
-    # Streamlit assigns a separate file_id even to files with the same name.
     identity = upload.file_id
     if identity not in st.session_state.upload_seen:
         st.session_state.upload_seen.add(identity)
         with st.spinner(f"{upload.name} を準備しています…"):
             try:
-                st.session_state.documents.append(import_document(upload))
+                document = import_document(upload)
+                st.session_state.documents.append(document)
+                for page in document["pages"]:
+                    st.session_state.manager_pages.append(dict(page, document_id=document["id"],
+                                                               id=f"{document['id']}:{page['number']}"))
                 invalidate()
             except Exception as exc:
                 st.error(f"{upload.name}: {exc}")
-                st.caption("再試行する場合は、一度選択を外してから追加してください。")
 
 documents = st.session_state.documents
-if not documents:
-    st.info("上のエリアにファイルをドロップするか、ファイルを選択してください。")
-else:
-    total_pages = sum(sum(p["active"] for p in d["pages"]) for d in documents)
-    st.subheader(f"{len(documents)}ファイル · {total_pages}ページ")
-    st.caption("画像付きカードをドラッグして結合順を変更できます。画像をクリックすると拡大します。")
-    card_items = []
-    for document in documents:
-        active = [p for p in document["pages"] if p["active"]]
-        image = None
-        if active:
-            try:
-                image = "data:image/png;base64," + base64.b64encode(
-                    Path(preview(document, active[0])).read_bytes()).decode("ascii")
-            except Exception:
-                pass
-        card_items.append({"id": document["id"], "name": document["name"],
-                           "active": len(active), "total": len(document["pages"]), "image": image})
-    event = cards_component()(items=card_items, revision=st.session_state.order_epoch,
-                              key=f"file-cards-{st.session_state.upload_epoch}", default=None)
-    if (isinstance(event, dict) and event.get("event_id") != st.session_state.get("last_card_event")
-            and event.get("revision") == st.session_state.order_epoch):
-        st.session_state.last_card_event = event.get("event_id")
-        by_id = {d["id"]: d for d in documents}
-        action, document_id = event.get("action"), event.get("id")
-        if action == "reorder":
-            order = event.get("order")
-            if (isinstance(order, list) and len(order) == len(by_id)
-                    and all(isinstance(i, str) for i in order) and set(order) == set(by_id)
-                    and order != [d["id"] for d in documents]):
-                st.session_state.documents = [by_id[i] for i in order]
-                invalidate()
-                st.rerun()
-        elif document_id in by_id:
-            if action == "remove":
-                st.session_state.documents = [d for d in documents if d["id"] != document_id]
-                shutil.rmtree(Path(by_id[document_id]["path"]).parent, ignore_errors=True)
-                invalidate()
-                st.rerun()
-            elif action in ("edit", "preview"):
-                st.session_state.editor_id = document_id if action == "edit" else None
-                st.session_state.preview_id = document_id if action == "preview" else None
-                st.rerun()
+pages = st.session_state.manager_pages
+by_document = {d["id"]: d for d in documents}
+active_count = sum(p["active"] for p in pages)
+if pages:
+    st.caption(f"{len(documents)}ファイル · {active_count}ページ")
 
+card_items = []
+for page in pages:
+    document = by_document[page["document_id"]]
+    image = None
+    try:
+        image = "data:image/png;base64," + base64.b64encode(
+            Path(preview(document, page, size=900)).read_bytes()).decode("ascii")
+    except Exception:
+        pass
+    card_items.append({"id": page["id"], "name": document["name"], "number": page["number"],
+                       "active": page["active"], "image": image})
+
+event = page_canvas()(items=card_items, revision=st.session_state.order_epoch,
+                      key=f"page-canvas-{st.session_state.upload_epoch}", default=None)
+if (isinstance(event, dict) and event.get("event_id") != st.session_state.get("last_page_event")
+        and event.get("revision") == st.session_state.order_epoch):
+    st.session_state.last_page_event = event.get("event_id")
+    by_id = {p["id"]: p for p in pages}
+    action, page_id = event.get("action"), event.get("id")
+    if action == "reorder":
+        order = event.get("order")
+        if valid_order(order, pages) and order != [p["id"] for p in pages]:
+            st.session_state.manager_pages = [by_id[i] for i in order]
+            invalidate()
+            st.rerun()
+    elif isinstance(page_id, str) and page_id in by_id:
+        page = by_id[page_id]
+        if action == "rotate":
+            page["rotation"] = (page["rotation"] + 90) % 360
+            invalidate()
+            st.rerun()
+        elif action == "toggle":
+            page["active"] = not page["active"]
+            invalidate()
+            st.rerun()
+        elif action == "preview":
+            st.session_state.manager_preview_id = page_id
+            st.rerun()
+
+if pages:
     st.divider()
     with st.expander("詳細設定"):
         use_ocr = st.checkbox("文字を検索できるPDFにする（OCR）", value=False)
         st.caption("日本語・英語に対応。通常の結合より時間とメモリを使います。")
+        st.caption("ファイルはサーバーで処理します。「すべてクリア」で削除できます。")
     name = st.text_input("保存するファイル名", value="結合した資料.pdf")
-    filename = Path(name.replace("\\", "/")).name.strip() or "結合した資料.pdf"
+    filename = Path(name.replace(chr(92), "/")).name.strip() or "結合した資料.pdf"
     if not filename.lower().endswith(".pdf"):
         filename += ".pdf"
-    signature = repr(([(d["id"], [(p["number"], p["rotation"], p["active"])
-                       for p in d["pages"]]) for d in documents], use_ocr))
-    if st.button("PDFを結合", type="primary", use_container_width=True, disabled=total_pages == 0):
+    signature = repr(([(p["id"], p["rotation"], p["active"]) for p in pages], use_ocr))
+    if st.button("PDFを結合", type="primary", use_container_width=True, disabled=active_count == 0):
         st.session_state.result_signature = None
         progress = st.progress(0, text="PDFを結合しています…")
         try:
             with tempfile.TemporaryDirectory(dir=root, prefix="output-") as output_dir:
                 combined = Path(output_dir) / "merged.pdf"
-                merge_documents(documents, combined)
+                merge_pages(documents, pages, combined)
                 progress.progress(60, text="文字を認識しています…" if use_ocr else "仕上げています…")
                 if use_ocr:
                     ocr = Path(output_dir) / "searchable.pdf"
                     run_command(["ocrmypdf", "-l", "jpn+eng", "--skip-text",
-                                 "--jobs", "1", "--optimize", "0",
-                                 str(combined), str(ocr)], 600)
+                                 "--jobs", "1", "--optimize", "0", str(combined), str(ocr)], 600)
                     combined = ocr
                 target = root / "result.pdf"
                 shutil.copyfile(combined, target)
@@ -315,18 +371,9 @@ else:
         finally:
             gc.collect()
     if st.session_state.result_signature == signature and st.session_state.result_path:
-        st.success("PDFが完成しました。下のボタンから保存できます。")
         with open(st.session_state.result_path, "rb") as result:
             st.download_button("PDFをダウンロード", result, file_name=filename,
                                mime="application/pdf", type="primary", use_container_width=True)
-    elif st.session_state.result_path:
-        st.caption("内容や設定が変更されています。「PDFを結合」を押して更新してください。")
 
-st.caption("ファイルはこのアプリのサーバーで処理されます。作業後は「すべてクリア」で削除できます。")
-
-if st.session_state.get("editor_id"):
-    edit_document(st.session_state.editor_id)
-
-
-if st.session_state.get("preview_id"):
-    enlarged_preview(st.session_state.preview_id)
+if st.session_state.get("manager_preview_id"):
+    enlarged_preview(st.session_state.manager_preview_id)
