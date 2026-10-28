@@ -128,7 +128,7 @@ PAGE_HTML = r'''
 .card:hover,.card:focus-within{border-color:#9ca3af}
 .card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}
 .card.excluded .preview{opacity:.4;filter:grayscale(1)}
-.preview{display:block;width:100%;height:140px;object-fit:contain;cursor:zoom-in}
+.preview{display:block;width:100%;height:140px;object-fit:contain;cursor:grab}
 .name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 0;color:#4b5563}
 .meta{font-size:11px;color:#667085;margin:8px 0 0;white-space:nowrap}
 .actions{position:absolute;top:9px;right:8px;display:flex;gap:4px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s}
@@ -188,12 +188,12 @@ function render(){
   card.ondrop=e=>{if(Array.from(e.dataTransfer.types||[]).includes("Files"))return;e.preventDefault();card.classList.remove("over");const from=items.findIndex(x=>x.id===dragged),to=items.findIndex(x=>x.id===item.id);if(from>=0&&to>=0)reorder(from,to);dragged=null};
   card.ondragend=()=>{dragged=null;document.querySelectorAll(".card").forEach(x=>x.classList.remove("over","dragging"))};
   const img=document.createElement(item.image?"img":"div");img.className="preview";img.draggable=false;
-  if(item.image){img.src=item.image;img.alt=item.name+" P."+item.number;img.onload=height;img.onclick=()=>emit("preview",item.id)}
+  if(item.image){img.src=item.image;img.alt=item.name+" P."+item.number;img.onload=height}
   else{img.textContent="プレビューなし"}card.append(img);
   const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · 元 P."+item.number+" / "+item.total+(item.active?"":" · 除外中");card.append(meta);
   const name=document.createElement("div");name.className="name";name.textContent=item.name;card.append(name);
   const actions=document.createElement("div");actions.className="actions";
-  actions.append(iconButton("zoom",()=>emit("preview",item.id),"拡大"),iconButton("rotate",()=>emit("rotate",item.id),"90度回転"),iconButton(item.active?"remove":"restore",()=>emit("toggle",item.id),item.active?"削除":"戻す"));
+  actions.append(iconButton("zoom",()=>emit("zoom",item.id),"拡大"),iconButton("rotate",()=>emit("rotate",item.id),"90度回転"),iconButton(item.active?"remove":"restore",()=>emit("toggle",item.id),item.active?"削除":"戻す"));
   card.append(actions);grid.append(card);
  });height();
 }
@@ -234,7 +234,7 @@ installFileDrop();send("streamlit:componentReady",{apiVersion:1});height();
 def page_canvas():
     folder = Path(tempfile.mkdtemp(prefix="pdf-page-canvas-"))
     (folder / "index.html").write_text(PAGE_HTML, encoding="utf-8")
-    return components.declare_component("pdf_page_canvas_v4", path=str(folder))
+    return components.declare_component("pdf_page_canvas_v5", path=str(folder))
 
 
 def valid_order(order, pages):
@@ -277,7 +277,6 @@ def enlarged_preview(page_id):
         st.caption(f"{document['name']} · P.{page['number']}")
         show_preview(document, page, size=1800)
     if st.button("閉じる", key="close-page-preview"):
-        st.session_state.manager_preview_id = None
         st.rerun()
 
 
@@ -354,8 +353,8 @@ if (isinstance(event, dict) and event.get("event_id") != st.session_state.get("l
             page["active"] = not page["active"]
             invalidate()
             st.rerun()
-        elif action == "preview":
-            st.session_state.manager_preview_id = page_id
+        elif action == "zoom":
+            st.session_state.manager_zoom_request = page_id
             st.rerun()
 
 if pages:
@@ -397,5 +396,8 @@ if pages:
             st.download_button("PDFをダウンロード", result, file_name=filename,
                                mime="application/pdf", type="primary", use_container_width=True)
 
-if st.session_state.get("manager_preview_id"):
-    enlarged_preview(st.session_state.manager_preview_id)
+# Consume the request before opening. Dismissing with X or the backdrop must
+# never leave a persistent flag that reopens the dialog on the next action.
+zoom_request = st.session_state.pop("manager_zoom_request", None)
+if zoom_request:
+    enlarged_preview(zoom_request)
