@@ -1,206 +1,292 @@
-import streamlit as st
+import gc
+import math
+import shutil
 import subprocess
-import os
 import tempfile
-import io
-from pypdf import PdfWriter, PdfReader
+from contextlib import ExitStack
 from pathlib import Path
+from uuid import uuid4
+
+import streamlit as st
 from pdf2image import convert_from_path
+from PIL import Image
+from pypdf import PdfReader, PdfWriter
 from streamlit_sortables import sort_items
 
-# ページの基本設定
-st.set_page_config(page_title="PDFプロ編集スタジオ", layout="wide")
+st.set_page_config(page_title="PDF結合", page_icon="📄", layout="wide")
+st.markdown("""
+<style>
+.stApp {background: #f7f8fc;}
+.block-container {max-width: 1150px; padding-top: 2.5rem;}
+h1 {letter-spacing: -.04em;}
+div[data-testid="stVerticalBlockBorderWrapper"] {background: white; border-radius: 14px;}
+div[data-testid="stFileUploader"] {background: white; border-radius: 14px; padding: 12px;}
+div.stButton > button[kind="primary"] {background: #e44747; border-color: #e44747;}
+</style>
+""", unsafe_allow_html=True)
 
-st.title("🛡️ PDFプロ・編集スタジオ（xlsm対応版）")
-st.write("マクロ付きエクセル(xlsm)も読み込めるようになったよ！")
+# TemporaryDirectory cleans up when the session releases this object.
+if "pdf_workspace_v2" not in st.session_state:
+    st.session_state.pdf_workspace_v2 = tempfile.TemporaryDirectory(prefix="pdf-merge-")
+    st.session_state.documents = []
+    st.session_state.upload_seen = set()
+    st.session_state.upload_epoch = 0
+    st.session_state.order_epoch = 0
+    st.session_state.result_path = None
+    st.session_state.result_signature = None
 
-# --- 1. 魔法のメモ帳（セッションステート） ---
-if "all_pages_data" not in st.session_state:
-    st.session_state.all_pages_data = []
-if "global_zoom" not in st.session_state:
-    st.session_state.global_zoom = 250
-if "active_zoom_index" not in st.session_state:
-    st.session_state.active_zoom_index = None
+root = Path(st.session_state.pdf_workspace_v2.name)
 
-# --- 2. 拡大編集画面（ダイアログ） ---
-@st.dialog("ページを編集・確認", width="large")
-def zoom_edit_modal():
-    index = st.session_state.active_zoom_index
-    if index is None or index >= len(st.session_state.all_pages_data):
-        st.session_state.active_zoom_index = None
-        st.rerun()
+
+def invalidate():
+    st.session_state.result_signature = None
+    st.session_state.order_epoch += 1
+
+
+def run_command(command, timeout):
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"必要なツールが見つかりません: {command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("処理が制限時間を超えました。ファイルを小さくしてお試しください。") from exc
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "外部ツールの処理に失敗しました。")[-1200:])
+
+
+def import_document(upload):
+    folder = root / uuid4().hex
+    folder.mkdir()
+    try:
+        source = folder / ("source" + Path(upload.name).suffix.lower())
+        upload.seek(0)
+        with source.open("wb") as output:
+            shutil.copyfileobj(upload, output, length=1024 * 1024)
+        pdf = source
+        if source.suffix != ".pdf":
+            profile = (folder / "lo-profile").as_uri()
+            run_command(["soffice", f"-env:UserInstallation={profile}", "--headless",
+                         "--convert-to", "pdf", "--outdir", str(folder), str(source)], 120)
+            pdf = folder / "source.pdf"
+        if not pdf.is_file():
+            raise RuntimeError("PDFへの変換結果を確認できませんでした。")
+        with pdf.open("rb") as stream:
+            reader = PdfReader(stream)
+            if reader.is_encrypted and not reader.decrypt(""):
+                raise RuntimeError("パスワード付きPDFは、解除してから追加してください。")
+            count = len(reader.pages)
+        if not count:
+            raise RuntimeError("ページがありません。")
+        return {"id": folder.name, "name": upload.name, "path": str(pdf),
+                "pages": [{"number": n, "rotation": 0, "active": True} for n in range(1, count + 1)]}
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+
+def preview(document, page, size=240):
+    # Cache JPEGs on disk rather than retaining every page as a PIL image.
+    target = Path(document["path"]).parent / f"preview-{page['number']}-{page['rotation']}-{size}.jpg"
+    if not target.exists():
+        paths = convert_from_path(document["path"], first_page=page["number"],
+                                  last_page=page["number"], size=size, fmt="jpeg",
+                                  output_folder=str(target.parent), paths_only=True,
+                                  thread_count=1, timeout=45)
+        try:
+            with Image.open(paths[0]) as source:
+                rotated = source.rotate(-page["rotation"], expand=True)
+                try:
+                    rotated.save(target, "JPEG", quality=80)
+                finally:
+                    rotated.close()
+        finally:
+            for path in paths:
+                Path(path).unlink(missing_ok=True)
+    return str(target)
+
+
+def show_preview(document, page, size=240):
+    try:
+        st.image(preview(document, page, size), use_container_width=True)
+    except Exception:
+        st.caption("📄 プレビューを作成できません。結合は引き続きお試しいただけます。")
+
+
+def merge_documents(documents, destination):
+    # One reader per document; keep its stream open until the writer finishes.
+    writer = PdfWriter()
+    try:
+        with ExitStack() as stack:
+            for document in documents:
+                stream = stack.enter_context(open(document["path"], "rb"))
+                reader = PdfReader(stream)
+                if reader.is_encrypted:
+                    reader.decrypt("")
+                for page in document["pages"]:
+                    if page["active"]:
+                        original = reader.pages[page["number"] - 1]
+                        added = writer.add_page(original)
+                        if page["rotation"]:
+                            added.rotate(page["rotation"])
+            with open(destination, "wb") as output:
+                writer.write(output)
+    finally:
+        writer.close()
+
+
+@st.dialog("ページを編集", width="large")
+def edit_document(document_id):
+    document = next((d for d in st.session_state.documents if d["id"] == document_id), None)
+    if document is None:
         return
-
-    page_info = st.session_state.all_pages_data[index]
-    
-    col_nav1, col_edit, col_nav2, col_close = st.columns([1, 2, 1, 1])
-    with col_nav1:
-        if st.button("⬅️ 前へ", use_container_width=True, key="modal_prev_btn"):
-            if index > 0:
-                st.session_state.active_zoom_index = index - 1
-                st.rerun()
-    with col_edit:
-        c1, c2 = st.columns(2)
-        with c1:
-            icon = "🗑️ 削除" if page_info["active"] else "✅ 復活"
-            if st.button(icon, use_container_width=True, key="modal_delete_btn"):
-                page_info["active"] = not page_info["active"]
-                st.rerun()
-        with c2:
-            if st.button("🔄 回転", use_container_width=True, key="modal_rotate_btn"):
-                page_info["rotate"] = (page_info["rotate"] + 90) % 360
-                st.rerun()
-    with col_nav2:
-        if st.button("次へ ➡️", use_container_width=True, key="modal_next_btn"):
-            if index < len(st.session_state.all_pages_data) - 1:
-                st.session_state.active_zoom_index = index + 1
-                st.rerun()
-    with col_close:
-        if st.button("✖️ 閉じる", use_container_width=True, key="modal_close_btn", type="primary"):
-            st.session_state.active_zoom_index = None
-            st.rerun()
-
-    st.divider()
-    display_img = page_info["img"].rotate(-page_info["rotate"], expand=True)
-    if not page_info["active"]:
-        display_img = display_img.convert("L")
-        st.warning("⚠️ このページは削除設定中です")
-    st.image(display_img, use_container_width=True)
-
-if st.session_state.active_zoom_index is not None:
-    zoom_edit_modal()
-
-# --- 3. サイドバー ---
-with st.sidebar:
-    st.header("⚙️ 設定")
-    st.session_state.global_zoom = st.slider("🔍 一覧サイズ", 100, 500, st.session_state.global_zoom)
-    st.divider()
-    use_ocr = st.checkbox("OCRをかける")
-    if st.button("♻️ 最初からやり直す"):
-        st.session_state.all_pages_data = []
-        st.session_state.active_zoom_index = None
+    st.write(document["name"])
+    st.caption("ページをドラッグして並べ替えられます。除外したページはもう一度押すと戻せます。")
+    labels = [f"P.{p['number']}" for p in document["pages"]]
+    ordered = sort_items(labels, direction="horizontal",
+                         key=f"pages-{document_id}-{st.session_state.order_epoch}")
+    if ordered != labels and sorted(ordered) == sorted(labels):
+        by_label = dict(zip(labels, document["pages"]))
+        document["pages"] = [by_label[label] for label in ordered]
+        invalidate()
+        st.rerun()
+    total = len(document["pages"])
+    batch = int(st.number_input("表示範囲（1画面12ページ）", min_value=1,
+                               max_value=max(1, math.ceil(total / 12)), value=1,
+                               key=f"batch-{document_id}"))
+    start = (batch - 1) * 12
+    for offset in range(start, min(start + 12, total), 3):
+        columns = st.columns(3)
+        for column, page in zip(columns, document["pages"][offset:offset + 3]):
+            with column:
+                with st.container(border=True):
+                    show_preview(document, page)
+                    st.caption(f"P.{page['number']} · {page['rotation']}°" +
+                               ("" if page["active"] else " · 除外中"))
+                    left, right = st.columns(2)
+                    if left.button("除外" if page["active"] else "戻す",
+                                   key=f"toggle-{document_id}-{page['number']}"):
+                        page["active"] = not page["active"]
+                        invalidate()
+                        st.rerun()
+                    if right.button("↻ 回転", key=f"rotate-{document_id}-{page['number']}"):
+                        page["rotation"] = (page["rotation"] + 90) % 360
+                        invalidate()
+                        st.rerun()
+    if st.button("編集を完了", type="primary", use_container_width=True):
+        st.session_state.editor_id = None
         st.rerun()
 
-# --- 4. ファイルの読み込み（xlsmを追加しました！） ---
-uploaded_files = st.file_uploader(
-    "ファイルをえらんでね", 
-    type=["pdf", "docx", "xlsx", "pptx", "xlsm"], 
-    accept_multiple_files=True
-)
 
-if uploaded_files:
-    current_files = [p["filename"] for p in st.session_state.all_pages_data]
-    for uploaded_file in uploaded_files:
-        if uploaded_file.name not in current_files:
-            with st.spinner(f"{uploaded_file.name} を準備中..."):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    temp_dir_path = Path(temp_dir)
-                    input_path = temp_dir_path / uploaded_file.name
-                    with open(input_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    
-                    pdf_path = input_path
-                    if input_path.suffix.lower() != ".pdf":
-                        subprocess.run(["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir_path), str(input_path)])
-                        pdf_path = temp_dir_path / (input_path.stem + ".pdf")
-                    
-                    if pdf_path.exists():
-                        with open(pdf_path, "rb") as f:
-                            pdf_bytes = f.read()
-                        try:
-                            imgs = convert_from_path(pdf_path, size=(1200, None))
-                            for i, img in enumerate(imgs):
-                                st.session_state.all_pages_data.append({
-                                    "id": f"{uploaded_file.name}_{i}_{os.urandom(4).hex()}", 
-                                    "filename": uploaded_file.name,
-                                    "page_num": i + 1,
-                                    "img": img,
-                                    "pdf_bytes": pdf_bytes,
-                                    "active": True,
-                                    "rotate": 0
-                                })
-                        except Exception as e:
-                            st.error(f"エラー: {e}")
-                st.rerun()
+st.title("PDFを結合")
+st.write("ファイルを追加して、順番を変えて、ひとつのPDFに。")
+top_left, top_right = st.columns([4, 1])
+with top_left:
+    st.caption("① ファイルを追加　 →　 ② 順番を調整　 →　 ③ 結合して保存")
+with top_right:
+    if st.button("すべてクリア", use_container_width=True):
+        st.session_state.pdf_workspace_v2.cleanup()
+        for key in list(st.session_state):
+            del st.session_state[key]
+        gc.collect()
+        st.rerun()
 
-# --- 5. 並び替えと編集 ---
-if st.session_state.all_pages_data:
-    st.subheader("🤚 順番をいれかえる")
-    active_labels = [p["id"] for p in st.session_state.all_pages_data if p["active"]]
-    
-    if active_labels:
-        sorted_ids = sort_items(active_labels, direction="horizontal")
-        if sorted_ids != active_labels:
-            id_map = {p["id"]: p for p in st.session_state.all_pages_data}
-            inactive_list = [p for p in st.session_state.all_pages_data if not p["active"]]
-            st.session_state.all_pages_data = [id_map[sid] for sid in sorted_ids] + inactive_list
-            st.rerun()
+uploads = st.file_uploader("PDF・Word・Excel・PowerPointを追加",
+                          type=["pdf", "docx", "xlsx", "xlsm", "pptx"],
+                          accept_multiple_files=True,
+                          key=f"uploads-{st.session_state.upload_epoch}",
+                          help="Officeファイルは自動でPDFに変換します。マクロは実行しません。")
+for upload in uploads or []:
+    # Streamlit assigns a separate file_id even to files with the same name.
+    identity = upload.file_id
+    if identity not in st.session_state.upload_seen:
+        st.session_state.upload_seen.add(identity)
+        with st.spinner(f"{upload.name} を準備しています…"):
+            try:
+                st.session_state.documents.append(import_document(upload))
+                invalidate()
+            except Exception as exc:
+                st.error(f"{upload.name}: {exc}")
+                st.caption("再試行する場合は、一度選択を外してから追加してください。")
+
+documents = st.session_state.documents
+if not documents:
+    st.info("上のエリアにファイルをドロップするか、ファイルを選択してください。")
+else:
+    total_pages = sum(sum(p["active"] for p in d["pages"]) for d in documents)
+    st.subheader(f"{len(documents)}ファイル · {total_pages}ページ")
+    st.caption("ファイル名をドラッグして結合順を変更。カードの「ページ編集」で削除・回転ができます。")
+    # Stable ordinals disambiguate duplicate filenames without exposing random IDs.
+    labels = [f"{d['name']} 〈{i + 1}〉" for i, d in enumerate(documents)]
+    order = sort_items(labels, direction="horizontal",
+                       key=f"documents-{st.session_state.order_epoch}")
+    if order != labels and sorted(order) == sorted(labels):
+        by_label = dict(zip(labels, documents))
+        st.session_state.documents = [by_label[label] for label in order]
+        invalidate()
+        st.rerun()
+    for offset in range(0, len(documents), 4):
+        for index, (column, document) in enumerate(zip(st.columns(4), documents[offset:offset + 4]), offset):
+            with column:
+                with st.container(border=True):
+                    pages = [p for p in document["pages"] if p["active"]]
+                    if pages:
+                        show_preview(document, pages[0])
+                    else:
+                        st.info("全ページ除外中")
+                    st.write(f"**{index + 1}. {document['name']}**")
+                    st.caption(f"{len(pages)} / {len(document['pages'])} ページ")
+                    if st.button("ページ編集", key=f"edit-{document['id']}", use_container_width=True):
+                        st.session_state.editor_id = document["id"]
+                        st.rerun()
+                    if st.button("ファイルを削除", key=f"remove-{document['id']}", use_container_width=True):
+                        st.session_state.documents = [d for d in documents if d["id"] != document["id"]]
+                        shutil.rmtree(Path(document["path"]).parent, ignore_errors=True)
+                        invalidate()
+                        st.rerun()
 
     st.divider()
-    st.subheader("📝 ページごとの編集")
-    
-    rows = [st.session_state.all_pages_data[i:i+4] for i in range(0, len(st.session_state.all_pages_data), 4)]
-    for row_idx, row_pages in enumerate(rows):
-        cols = st.columns(4)
-        for i, page in enumerate(row_pages):
-            idx = row_idx * 4 + i
-            with cols[i]:
-                d_img = page["img"].rotate(-page["rotate"], expand=True)
-                if not page["active"]: d_img = d_img.convert("L")
-                st.image(d_img, width=st.session_state.global_zoom)
-                
-                b1, b2, b3 = st.columns(3)
-                with b1:
-                    icon = "🗑️" if page["active"] else "✅"
-                    if st.button(icon, key=f"action_del_{page['id']}"):
-                        page["active"] = not page["active"]
-                        st.rerun()
-                with b2:
-                    if st.button("🔄", key=f"action_rot_{page['id']}"):
-                        page["rotate"] = (page["rotate"] + 90) % 360
-                        st.rerun()
-                with b3:
-                    if st.button("🔍", key=f"action_zoom_{page['id']}"):
-                        st.session_state.active_zoom_index = idx
-                        st.rerun()
-                st.caption(f"{'削除済' if not page['active'] else 'No.' + str(idx+1)}")
+    with st.expander("詳細設定"):
+        use_ocr = st.checkbox("文字を検索できるPDFにする（OCR）", value=False)
+        st.caption("日本語・英語に対応。通常の結合より時間とメモリを使います。")
+    name = st.text_input("保存するファイル名", value="結合した資料.pdf")
+    filename = Path(name.replace("\\", "/")).name.strip() or "結合した資料.pdf"
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    signature = repr(([(d["id"], [(p["number"], p["rotation"], p["active"])
+                       for p in d["pages"]]) for d in documents], use_ocr))
+    if st.button("PDFを結合", type="primary", use_container_width=True, disabled=total_pages == 0):
+        st.session_state.result_signature = None
+        progress = st.progress(0, text="PDFを結合しています…")
+        try:
+            with tempfile.TemporaryDirectory(dir=root, prefix="output-") as output_dir:
+                combined = Path(output_dir) / "merged.pdf"
+                merge_documents(documents, combined)
+                progress.progress(60, text="文字を認識しています…" if use_ocr else "仕上げています…")
+                if use_ocr:
+                    ocr = Path(output_dir) / "searchable.pdf"
+                    run_command(["ocrmypdf", "-l", "jpn+eng", "--skip-text",
+                                 "--jobs", "1", "--optimize", "0",
+                                 str(combined), str(ocr)], 600)
+                    combined = ocr
+                target = root / "result.pdf"
+                shutil.copyfile(combined, target)
+                st.session_state.result_path = str(target)
+                st.session_state.result_signature = signature
+            progress.progress(100, text="完成しました")
+        except Exception as exc:
+            progress.empty()
+            st.error(f"結合できませんでした: {exc}")
+        finally:
+            gc.collect()
+    if st.session_state.result_signature == signature and st.session_state.result_path:
+        st.success("PDFが完成しました。下のボタンから保存できます。")
+        with open(st.session_state.result_path, "rb") as result:
+            st.download_button("PDFをダウンロード", result, file_name=filename,
+                               mime="application/pdf", type="primary", use_container_width=True)
+    elif st.session_state.result_path:
+        st.caption("内容や設定が変更されています。「PDFを結合」を押して更新してください。")
 
-    # --- 6. 最終合体処理 ---
-    st.divider()
-    st.subheader("🏁 仕上げ")
-    custom_filename = st.text_input("💾 保存するファイルの名前を決めてね", value="merged_document")
-    
-    if st.button("🚀 PDFを作成して保存", type="primary", use_container_width=True):
-        active_pages = [p for p in st.session_state.all_pages_data if p["active"]]
-        if not active_pages:
-            st.warning("使うページをえらんでね。")
-        else:
-            final_merger = PdfWriter()
-            with tempfile.TemporaryDirectory() as save_dir:
-                save_dir_path = Path(save_dir)
-                for idx, page in enumerate(active_pages):
-                    pdf_stream = io.BytesIO(page["pdf_bytes"])
-                    reader = PdfReader(pdf_stream)
-                    writer = PdfWriter()
-                    page_obj = reader.pages[page["page_num"] - 1]
-                    page_obj.rotate(page["rotate"])
-                    writer.add_page(page_obj)
-                    
-                    temp_p = save_dir_path / f"temp_{idx}.pdf"
-                    with open(temp_p, "wb") as f:
-                        writer.write(f)
-                    
-                    final_path = temp_p
-                    if use_ocr:
-                        st.write(f"👁️ OCR中... {page['id']}")
-                        ocr_p = save_dir_path / f"ocr_{idx}.pdf"
-                        subprocess.run(["ocrmypdf", "-l", "jpn+eng", "--force-ocr", str(final_path), str(ocr_p)])
-                        final_path = ocr_p
-                    final_merger.append(str(final_path))
-                
-                output = io.BytesIO()
-                final_merger.write(output)
-                
-                final_name = custom_filename if custom_filename.endswith(".pdf") else f"{custom_filename}.pdf"
-                st.success(f"🎉 「{final_name}」が完成しました！")
-                st.download_button("📥 ダウンロードする", output.getvalue(), final_name, "application/pdf")
+st.caption("ファイルはこのアプリのサーバーで処理されます。作業後は「すべてクリア」で削除できます。")
+
+if st.session_state.get("editor_id"):
+    edit_document(st.session_state.editor_id)
