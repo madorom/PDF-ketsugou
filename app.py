@@ -13,7 +13,8 @@ import streamlit.components.v1 as components
 from pdf2image import convert_from_path
 from pypdf import PdfReader, PdfWriter
 
-from page_sizes import PAPER_SIZES_MM, add_output_page, describe_size, size_signature
+from page_sizes import (PAPER_SIZES_MM, add_output_page, describe_size,
+                        describe_source_size, size_signature, source_size_metadata)
 
 st.set_page_config(page_title="PDFManager", page_icon="📄", layout="wide")
 st.markdown("""
@@ -73,6 +74,32 @@ def run_command(command, timeout):
         raise RuntimeError((result.stderr or result.stdout or "外部ツールの処理に失敗しました。")[-1200:])
 
 
+def read_source_sizes(reader):
+    sizes = {}
+    for number, source_page in enumerate(reader.pages, start=1):
+        try:
+            sizes[number] = source_size_metadata(source_page)
+        except Exception:
+            # Size labels are optional; an unreadable label must not block merging.
+            sizes[number] = {"source_width_mm": None, "source_height_mm": None}
+    return sizes
+
+
+def restore_source_sizes(document):
+    # Backfill documents uploaded before the size labels were introduced.
+    # Cache once per document, rather than reopening the PDF on every rerun.
+    if "source_sizes" not in document:
+        try:
+            with open(document["path"], "rb") as stream:
+                reader = PdfReader(stream)
+                if reader.is_encrypted:
+                    reader.decrypt("")
+                document["source_sizes"] = read_source_sizes(reader)
+        except Exception:
+            document["source_sizes"] = {}
+    return document["source_sizes"]
+
+
 def import_document(upload):
     folder = root / uuid4().hex
     folder.mkdir()
@@ -94,12 +121,14 @@ def import_document(upload):
             if reader.is_encrypted and not reader.decrypt(""):
                 raise RuntimeError("パスワード付きPDFは、解除してから追加してください。")
             count = len(reader.pages)
+            source_sizes = read_source_sizes(reader)
         if not count:
             raise RuntimeError("ページがありません。")
-        return {"id": folder.name, "name": upload.name, "path": str(pdf),
+        return {"id": folder.name, "name": upload.name, "path": str(pdf), "source_sizes": source_sizes,
                 "pages": [{"number": n, "rotation": 0, "active": True,
                            "paper_size": st.session_state.default_paper_size,
-                           "paper_orientation": "auto"} for n in range(1, count + 1)]}
+                           "paper_orientation": "auto", **source_sizes[n]}
+                          for n in range(1, count + 1)]}
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
         raise
@@ -144,13 +173,14 @@ PAGE_HTML = r'''
 *{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}
 .toolbar{display:flex;justify-content:flex-end;margin:0 0 12px}
 #cards{display:grid;grid-template-columns:repeat(auto-fill,198px);gap:10px;align-items:start;min-height:360px}
-.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:50px 8px 8px;cursor:grab;min-width:0;width:198px;height:276px;box-shadow:0 2px 8px #1a203008}
+.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:50px 8px 8px;cursor:grab;min-width:0;width:198px;height:296px;box-shadow:0 2px 8px #1a203008}
 .card:hover,.card:focus-within{border-color:#9ca3af}
 .card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}
 .card.excluded .preview{opacity:.4;filter:grayscale(1)}
 .preview{display:block;width:100%;height:140px;object-fit:contain;cursor:grab}
 .name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 0;color:#4b5563}
 .meta{font-size:11px;color:#667085;margin:8px 0 0;white-space:nowrap}
+.source-size{font-size:11px;line-height:1.4;color:#667085;margin:6px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .paper-setting{display:block;width:100%;margin-top:7px;padding:4px 6px;font-size:11px;line-height:1.3;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#f7f8fc;color:#414859}
 .actions{position:absolute;top:9px;right:8px;display:flex;gap:4px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s}
 .card:hover .actions,.card:focus-within .actions{opacity:1;visibility:visible;pointer-events:auto}
@@ -213,6 +243,8 @@ function render(){
   else{img.textContent="プレビューなし"}card.append(img);
   const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · 元 P."+item.number+" / "+item.total+(item.active?"":" · 除外中");card.append(meta);
   const name=document.createElement("div");name.className="name";name.textContent=item.name;card.append(name);
+  const sourceSize=document.createElement("div");sourceSize.className="source-size";sourceSize.textContent="元："+item.source_label;
+  sourceSize.title="元の用紙サイズ："+item.source_detail;card.append(sourceSize);
   const paper=button("用紙："+item.paper_label+" ▾",()=>emit("paper",item.id),"用紙設定");paper.className="paper-setting";
   paper.setAttribute("aria-label","用紙設定："+item.name+" P."+item.number);card.append(paper);
   const actions=document.createElement("div");actions.className="actions";
@@ -257,7 +289,7 @@ installFileDrop();send("streamlit:componentReady",{apiVersion:1});height();
 def page_canvas():
     folder = Path(tempfile.mkdtemp(prefix="pdf-page-canvas-"))
     (folder / "index.html").write_text(PAGE_HTML, encoding="utf-8")
-    return components.declare_component("pdf_page_canvas_v6", path=str(folder))
+    return components.declare_component("pdf_page_canvas_v7", path=str(folder))
 
 
 def valid_order(order, pages):
@@ -294,7 +326,8 @@ def enlarged_preview(page_id):
     page = next((p for p in st.session_state.manager_pages if p["id"] == page_id), None)
     if page:
         document = next(d for d in st.session_state.documents if d["id"] == page["document_id"])
-        st.caption(f"{document['name']} · P.{page['number']} · {describe_size(page)}")
+        st.caption(f"{document['name']} · P.{page['number']}")
+        st.caption(f"元の用紙：{describe_source_size(page, detailed=True)} ｜ 出力：{describe_size(page)}")
         show_preview(document, page, size=1800)
     if st.button("閉じる", key="close-page-preview"):
         st.rerun()
@@ -307,6 +340,7 @@ def page_paper_settings(page_id):
         return
     document = next(d for d in st.session_state.documents if d["id"] == page["document_id"])
     st.caption(f"{document['name']} · 元 P.{page['number']}")
+    st.caption(f"元の用紙：{describe_source_size(page, detailed=True)}")
     labels = {"original": "元のサイズを維持", "A4": "A4", "A3": "A3", "A5": "A5",
               "B4": "B4（JIS）", "B5": "B5（JIS）", "custom": "任意のサイズ（mm）"}
     options = list(labels)
@@ -400,11 +434,14 @@ if pages:
     default_label = "元のサイズを維持" if st.session_state.default_paper_size == "original" else "A4（元の向き）"
     st.caption(f"追加するページの初期設定：{default_label}")
 else:
-    st.caption("初期設定は「元のサイズを維持」です。追加後に一括変更・ページごとの変更ができます。")
+    st.caption("初期設定は「元のサイズを維持」です。各ページに元の用紙サイズを表示し、一括変更・個別変更ができます。")
 
 card_items = []
 for page in pages:
     document = by_document[page["document_id"]]
+    if "source_width_mm" not in page or "source_height_mm" not in page:
+        page.update(restore_source_sizes(document).get(
+            page["number"], {"source_width_mm": None, "source_height_mm": None}))
     image = None
     try:
         image = "data:image/png;base64," + base64.b64encode(
@@ -412,7 +449,9 @@ for page in pages:
     except Exception:
         pass
     card_items.append({"id": page["id"], "name": document["name"], "number": page["number"], "total": len(document["pages"]),
-                       "active": page["active"], "image": image, "paper_label": describe_size(page)})
+                       "active": page["active"], "image": image, "paper_label": describe_size(page),
+                       "source_label": describe_source_size(page),
+                       "source_detail": describe_source_size(page, detailed=True)})
 
 event = page_canvas()(items=card_items, revision=st.session_state.order_epoch,
                       key=f"page-canvas-{st.session_state.upload_epoch}", default=None)

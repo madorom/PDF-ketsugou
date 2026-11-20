@@ -7,6 +7,7 @@ from copy import copy
 from math import isfinite
 
 from pypdf import Transformation
+from pypdf.errors import PdfReadError
 from pypdf.generic import NameObject, RectangleObject
 
 
@@ -49,15 +50,91 @@ def size_signature(settings):
     return (paper_size, orientation)
 
 
+def source_size_metadata(source_page):
+    """Read the original visible size in mm, including its stored rotation.
+
+    Reading rectangle properties can populate defaults in a page dictionary,
+    so even these read-only measurements must operate on a shallow copy.
+    """
+    try:
+        source = copy(source_page)
+        media, crop = source.mediabox, source.cropbox
+        coordinates = [float(value) for value in (*media, *crop)]
+        unit, rotation = float(source.user_unit), float(source.rotation)
+        if (len(coordinates) != 8
+                or not all(isfinite(v) for v in (*coordinates, unit, rotation))
+                or unit <= 0 or rotation % 90):
+            raise ValueError("Invalid page geometry")
+        left, bottom = max(coordinates[0], coordinates[4]), max(coordinates[1], coordinates[5])
+        right, top = min(coordinates[2], coordinates[6]), min(coordinates[3], coordinates[7])
+        width, height = (right - left) * unit / POINTS_PER_MM, (top - bottom) * unit / POINTS_PER_MM
+        if not all(isfinite(v) and v > 0 for v in (width, height)):
+            raise ValueError("Invalid visible page size")
+        if rotation % 180:
+            width, height = height, width
+        return {"source_width_mm": width, "source_height_mm": height}
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError, OverflowError, PdfReadError) as exc:
+        raise ValueError("元のPDFのページサイズを読み取れませんでした。") from exc
+
+
+def _source_dimensions(settings, rotated=False):
+    try:
+        width = float(settings["source_width_mm"])
+        height = float(settings["source_height_mm"])
+        if not all(isfinite(v) and v > 0 for v in (width, height)):
+            return None
+        if rotated:
+            rotation = settings.get("rotation", 0)
+            if not isinstance(rotation, int) or rotation % 90:
+                return None
+            if rotation % 180:
+                width, height = height, width
+        return width, height
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _paper_name(name):
+    return name + ("（JIS）" if name.startswith("B") else "")
+
+
+def _describe_dimensions(width, height, detailed=False):
+    # One decimal is useful for actual PDF measurements without displaying
+    # floating-point noise or hiding a nonstandard size behind a paper label.
+    dimension_text = f"{width:.1f}".removesuffix(".0") + " × " + f"{height:.1f}".removesuffix(".0") + " mm"
+    short_side, long_side = sorted((width, height))
+    for name, (paper_width, paper_height) in PAPER_SIZES_MM.items():
+        if abs(short_side - paper_width) <= 1 and abs(long_side - paper_height) <= 1:
+            label = f"{_paper_name(name)}・{'横' if width > height else '縦'}"
+            return f"{label}（{dimension_text}）" if detailed else label
+    return dimension_text
+
+
+def describe_source_size(settings, detailed=False):
+    """Describe the uploaded page, before any rotation made in the app."""
+    dimensions = _source_dimensions(settings)
+    if dimensions is None:
+        return "サイズ不明"
+    return _describe_dimensions(*dimensions, detailed=detailed)
+
+
 def describe_size(settings):
     signature = size_signature(settings)
     if signature[0] == "original":
+        dimensions = _source_dimensions(settings, rotated=True)
+        if dimensions is not None:
+            return _describe_dimensions(*dimensions) + "（元）"
         return "元のサイズ"
     if signature[0] == "custom":
         return f"{signature[1]:g} × {signature[2]:g} mm"
-    name = signature[0] + ("（JIS）" if signature[0].startswith("B") else "")
+    name = _paper_name(signature[0])
     orientation = {"auto": "元の向き", "portrait": "縦", "landscape": "横"}
-    return f"{name}・{orientation[signature[1]]}"
+    direction = orientation[signature[1]]
+    if signature[1] == "auto":
+        dimensions = _source_dimensions(settings, rotated=True)
+        if dimensions is not None:
+            direction = "横" if dimensions[0] > dimensions[1] else "縦"
+    return f"{name}・{direction}"
 
 
 def add_output_page(writer, source_page, settings):
