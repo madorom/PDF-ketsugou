@@ -4,14 +4,16 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import ExitStack
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
 import streamlit.components.v1 as components
 from pdf2image import convert_from_path
-from PIL import Image
 from pypdf import PdfReader, PdfWriter
+
+from page_sizes import PAPER_SIZES_MM, add_output_page, describe_size, size_signature
 
 st.set_page_config(page_title="PDFManager", page_icon="📄", layout="wide")
 st.markdown("""
@@ -35,6 +37,7 @@ if "pdf_workspace_v2" not in st.session_state:
     st.session_state.result_signature = None
 
 root = Path(st.session_state.pdf_workspace_v2.name)
+st.session_state.setdefault("default_paper_size", "original")
 
 # Preserve uploaded documents when upgrading an existing session.
 if "manager_pages" not in st.session_state:
@@ -48,6 +51,15 @@ if "manager_pages" not in st.session_state:
 def invalidate():
     st.session_state.result_signature = None
     st.session_state.order_epoch += 1
+
+
+def apply_paper_size_to_all(paper_size):
+    st.session_state.default_paper_size = paper_size
+    for page in st.session_state.manager_pages:
+        page.update(paper_size=paper_size, paper_orientation="auto",
+                    paper_width_mm=210.0, paper_height_mm=297.0)
+    invalidate()
+    st.rerun()
 
 
 def run_command(command, timeout):
@@ -85,30 +97,38 @@ def import_document(upload):
         if not count:
             raise RuntimeError("ページがありません。")
         return {"id": folder.name, "name": upload.name, "path": str(pdf),
-                "pages": [{"number": n, "rotation": 0, "active": True} for n in range(1, count + 1)]}
+                "pages": [{"number": n, "rotation": 0, "active": True,
+                           "paper_size": st.session_state.default_paper_size,
+                           "paper_orientation": "auto"} for n in range(1, count + 1)]}
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
         raise
 
 
 def preview(document, page, size=900):
-    # Cache lossless previews on disk; render only the requested pages.
-    target = Path(document["path"]).parent / f"preview-{page['number']}-{page['rotation']}-{size}.png"
+    # Render the same transformed page that is written to the final PDF.
+    # Including all paper settings in the cache key prevents stale previews.
+    fingerprint = sha256(repr((page["rotation"], size_signature(page))).encode()).hexdigest()[:20]
+    target = Path(document["path"]).parent / f"preview-v2-{page['number']}-{fingerprint}-{size}.png"
     if not target.exists():
-        paths = convert_from_path(document["path"], first_page=page["number"],
-                                  last_page=page["number"], size=size, fmt="png",
-                                  output_folder=str(target.parent), paths_only=True,
-                                  thread_count=1, timeout=45)
-        try:
-            with Image.open(paths[0]) as source:
-                rotated = source.rotate(-page["rotation"], expand=True)
-                try:
-                    rotated.save(target, "PNG")
-                finally:
-                    rotated.close()
-        finally:
-            for path in paths:
-                Path(path).unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory(dir=target.parent, prefix="preview-") as render_dir:
+            single_page = Path(render_dir) / "page.pdf"
+            writer = PdfWriter()
+            try:
+                with open(document["path"], "rb") as stream:
+                    reader = PdfReader(stream)
+                    if reader.is_encrypted:
+                        reader.decrypt("")
+                    add_output_page(writer, reader.pages[page["number"] - 1], page)
+                    with single_page.open("wb") as output:
+                        writer.write(output)
+            finally:
+                writer.close()
+            paths = convert_from_path(single_page, first_page=1, last_page=1,
+                                      size=size, fmt="png", use_cropbox=True,
+                                      output_folder=render_dir, paths_only=True,
+                                      thread_count=1, timeout=45)
+            shutil.move(paths[0], target)
     return str(target)
 
 
@@ -124,13 +144,14 @@ PAGE_HTML = r'''
 *{box-sizing:border-box}body{margin:0;padding:6px;font:14px system-ui,sans-serif;color:#202331}
 .toolbar{display:flex;justify-content:flex-end;margin:0 0 12px}
 #cards{display:grid;grid-template-columns:repeat(auto-fill,198px);gap:10px;align-items:start;min-height:360px}
-.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:50px 8px 8px;cursor:grab;min-width:0;width:198px;height:244px;box-shadow:0 2px 8px #1a203008}
+.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:50px 8px 8px;cursor:grab;min-width:0;width:198px;height:276px;box-shadow:0 2px 8px #1a203008}
 .card:hover,.card:focus-within{border-color:#9ca3af}
 .card:active{cursor:grabbing}.card.dragging{opacity:.35}.card.over{outline:3px solid #e44747}
 .card.excluded .preview{opacity:.4;filter:grayscale(1)}
 .preview{display:block;width:100%;height:140px;object-fit:contain;cursor:grab}
 .name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:5px 0 0;color:#4b5563}
 .meta{font-size:11px;color:#667085;margin:8px 0 0;white-space:nowrap}
+.paper-setting{display:block;width:100%;margin-top:7px;padding:4px 6px;font-size:11px;line-height:1.3;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#f7f8fc;color:#414859}
 .actions{position:absolute;top:9px;right:8px;display:flex;gap:4px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s}
 .card:hover .actions,.card:focus-within .actions{opacity:1;visibility:visible;pointer-events:auto}
 .actions button{width:26px;height:26px;display:grid;place-items:center;padding:4px;border-radius:50%;background:#f0f1f5;border-color:#e5e7eb}
@@ -192,6 +213,8 @@ function render(){
   else{img.textContent="プレビューなし"}card.append(img);
   const meta=document.createElement("div");meta.className="meta";meta.textContent=(index+1)+" · 元 P."+item.number+" / "+item.total+(item.active?"":" · 除外中");card.append(meta);
   const name=document.createElement("div");name.className="name";name.textContent=item.name;card.append(name);
+  const paper=button("用紙："+item.paper_label+" ▾",()=>emit("paper",item.id),"用紙設定");paper.className="paper-setting";
+  paper.setAttribute("aria-label","用紙設定："+item.name+" P."+item.number);card.append(paper);
   const actions=document.createElement("div");actions.className="actions";
   actions.append(iconButton("zoom",()=>emit("zoom",item.id),"拡大"),iconButton("rotate",()=>emit("rotate",item.id),"90度回転"),iconButton(item.active?"remove":"restore",()=>emit("toggle",item.id),item.active?"削除":"戻す"));
   card.append(actions);grid.append(card);
@@ -234,7 +257,7 @@ installFileDrop();send("streamlit:componentReady",{apiVersion:1});height();
 def page_canvas():
     folder = Path(tempfile.mkdtemp(prefix="pdf-page-canvas-"))
     (folder / "index.html").write_text(PAGE_HTML, encoding="utf-8")
-    return components.declare_component("pdf_page_canvas_v5", path=str(folder))
+    return components.declare_component("pdf_page_canvas_v6", path=str(folder))
 
 
 def valid_order(order, pages):
@@ -259,10 +282,7 @@ def merge_pages(documents, pages, destination):
                     if reader.is_encrypted:
                         reader.decrypt("")
                     readers[document_id] = reader
-                # Each page is cloned by the writer; source pages stay untouched.
-                added = writer.add_page(readers[document_id].pages[page["number"] - 1])
-                if page["rotation"]:
-                    added.rotate(page["rotation"])
+                add_output_page(writer, readers[document_id].pages[page["number"] - 1], page)
             with open(destination, "wb") as output:
                 writer.write(output)
     finally:
@@ -274,10 +294,61 @@ def enlarged_preview(page_id):
     page = next((p for p in st.session_state.manager_pages if p["id"] == page_id), None)
     if page:
         document = next(d for d in st.session_state.documents if d["id"] == page["document_id"])
-        st.caption(f"{document['name']} · P.{page['number']}")
+        st.caption(f"{document['name']} · P.{page['number']} · {describe_size(page)}")
         show_preview(document, page, size=1800)
     if st.button("閉じる", key="close-page-preview"):
         st.rerun()
+
+
+@st.dialog("ページの用紙設定", width="small")
+def page_paper_settings(page_id):
+    page = next((p for p in st.session_state.manager_pages if p["id"] == page_id), None)
+    if page is None:
+        return
+    document = next(d for d in st.session_state.documents if d["id"] == page["document_id"])
+    st.caption(f"{document['name']} · 元 P.{page['number']}")
+    labels = {"original": "元のサイズを維持", "A4": "A4", "A3": "A3", "A5": "A5",
+              "B4": "B4（JIS）", "B5": "B5（JIS）", "custom": "任意のサイズ（mm）"}
+    options = list(labels)
+    prefix = f"paper-{page_id}-{st.session_state.order_epoch}"
+    paper_size = st.selectbox("用紙サイズ", options, format_func=labels.get,
+                              index=options.index(page.get("paper_size", "original")),
+                              key=f"{prefix}-size")
+    settings = {"paper_size": paper_size, "paper_orientation": "auto",
+                "paper_width_mm": page.get("paper_width_mm", 210.0),
+                "paper_height_mm": page.get("paper_height_mm", 297.0)}
+    if paper_size == "custom":
+        left, right = st.columns(2)
+        with left:
+            settings["paper_width_mm"] = st.number_input(
+                "幅（mm）", min_value=10.0, max_value=2000.0,
+                value=float(settings["paper_width_mm"]), step=1.0, key=f"{prefix}-width")
+        with right:
+            settings["paper_height_mm"] = st.number_input(
+                "高さ（mm）", min_value=10.0, max_value=2000.0,
+                value=float(settings["paper_height_mm"]), step=1.0, key=f"{prefix}-height")
+    elif paper_size != "original":
+        orientations = {"auto": "元の向きに合わせる", "portrait": "縦", "landscape": "横"}
+        settings["paper_orientation"] = st.radio(
+            "用紙の向き", list(orientations), format_func=orientations.get, horizontal=True,
+            index=list(orientations).index(page.get("paper_orientation", "auto")),
+            key=f"{prefix}-orientation")
+        width, height = PAPER_SIZES_MM[paper_size]
+        if settings["paper_orientation"] == "landscape":
+            width, height = height, width
+        label = "規格寸法" if settings["paper_orientation"] == "auto" else "用紙寸法（幅 × 高さ）"
+        st.caption(f"{label}：{width} × {height} mm")
+    if paper_size != "original":
+        st.caption("内容の縦横比を保って用紙に収め、中央に配置します。余った部分は余白になります。")
+    apply, cancel = st.columns(2)
+    with apply:
+        if st.button("適用", type="primary", use_container_width=True, key=f"{prefix}-apply"):
+            page.update(settings)
+            invalidate()
+            st.rerun()
+    with cancel:
+        if st.button("キャンセル", use_container_width=True, key=f"{prefix}-cancel"):
+            st.rerun()
 
 
 left, right = st.columns([5, 1])
@@ -317,6 +388,19 @@ by_document = {d["id"]: d for d in documents}
 active_count = sum(p["active"] for p in pages)
 if pages:
     st.caption(f"{len(documents)}ファイル · {active_count}ページ")
+    a4, original, guidance = st.columns([2, 2, 3])
+    with a4:
+        if st.button("すべてA4に統一", use_container_width=True):
+            apply_paper_size_to_all("A4")
+    with original:
+        if st.button("すべて元のサイズに戻す", use_container_width=True):
+            apply_paper_size_to_all("original")
+    with guidance:
+        st.caption("各ページの「用紙」から個別に変更できます。A4への一括変更は、元の縦・横を引き継ぎます。")
+    default_label = "元のサイズを維持" if st.session_state.default_paper_size == "original" else "A4（元の向き）"
+    st.caption(f"追加するページの初期設定：{default_label}")
+else:
+    st.caption("初期設定は「元のサイズを維持」です。追加後に一括変更・ページごとの変更ができます。")
 
 card_items = []
 for page in pages:
@@ -328,7 +412,7 @@ for page in pages:
     except Exception:
         pass
     card_items.append({"id": page["id"], "name": document["name"], "number": page["number"], "total": len(document["pages"]),
-                       "active": page["active"], "image": image})
+                       "active": page["active"], "image": image, "paper_label": describe_size(page)})
 
 event = page_canvas()(items=card_items, revision=st.session_state.order_epoch,
                       key=f"page-canvas-{st.session_state.upload_epoch}", default=None)
@@ -356,6 +440,9 @@ if (isinstance(event, dict) and event.get("event_id") != st.session_state.get("l
         elif action == "zoom":
             st.session_state.manager_zoom_request = page_id
             st.rerun()
+        elif action == "paper":
+            st.session_state.manager_size_request = page_id
+            st.rerun()
 
 if pages:
     st.divider()
@@ -367,7 +454,7 @@ if pages:
     filename = Path(name.replace(chr(92), "/")).name.strip() or "結合した資料.pdf"
     if not filename.lower().endswith(".pdf"):
         filename += ".pdf"
-    signature = repr(([(p["id"], p["rotation"], p["active"]) for p in pages], use_ocr))
+    signature = repr(([(p["id"], p["rotation"], p["active"], size_signature(p)) for p in pages], use_ocr))
     if st.button("PDFを結合", type="primary", use_container_width=True, disabled=active_count == 0):
         st.session_state.result_signature = None
         progress = st.progress(0, text="PDFを結合しています…")
@@ -399,5 +486,9 @@ if pages:
 # Consume the request before opening. Dismissing with X or the backdrop must
 # never leave a persistent flag that reopens the dialog on the next action.
 zoom_request = st.session_state.pop("manager_zoom_request", None)
+size_request = st.session_state.pop("manager_size_request", None)
 if zoom_request:
     enlarged_preview(zoom_request)
+elif size_request:
+    page_paper_settings(size_request)
+
